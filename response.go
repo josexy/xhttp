@@ -185,7 +185,11 @@ func ReadResponse(r *bufio.Reader, req *Request) (*Response, error) {
 	}
 
 	// Parse the response headers.
-	mimeHeader, err := tp.ReadMIMEHeader()
+	blockKind := HeaderBlockInitial
+	if resp.StatusCode >= 100 && resp.StatusCode <= 199 && resp.StatusCode != StatusSwitchingProtocols {
+		blockKind = HeaderBlockInformational
+	}
+	mimeHeader, initialBlock, err := readMIMEHeaderBlock(tp, blockKind, resp.StatusCode)
 	if err != nil {
 		if err == io.EOF {
 			err = io.ErrUnexpectedEOF
@@ -193,6 +197,9 @@ func ReadResponse(r *bufio.Reader, req *Request) (*Response, error) {
 		return nil, err
 	}
 	resp.Header = Header(mimeHeader)
+	blockStore := &headerBlockStore{}
+	blockStore.add(initialBlock)
+	registerResponseHeaderBlocks(resp, blockStore)
 
 	fixPragmaCacheControl(resp.Header)
 

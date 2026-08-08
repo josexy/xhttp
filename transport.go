@@ -596,7 +596,8 @@ func (t *Transport) roundTrip(req *Request) (_ *Response, err error) {
 		req.closeBody()
 		return nil, errors.New("http: nil Request.URL")
 	}
-	if req.Header == nil {
+	exactBlocks := requestHeaderBlocksToWrite(req.Context())
+	if req.Header == nil && exactBlocks.initial == nil {
 		req.closeBody()
 		return nil, errors.New("http: nil Request.Header")
 	}
@@ -604,15 +605,19 @@ func (t *Transport) roundTrip(req *Request) (_ *Response, err error) {
 	isHTTP := scheme == "http" || scheme == "https"
 	if isHTTP {
 		// Validate the outgoing headers.
-		if err := validateHeaders(req.Header); err != "" {
-			req.closeBody()
-			return nil, fmt.Errorf("net/http: invalid header %s", err)
+		if exactBlocks.initial == nil {
+			if err := validateHeaders(req.Header); err != "" {
+				req.closeBody()
+				return nil, fmt.Errorf("net/http: invalid header %s", err)
+			}
 		}
 
-		// Validate the outgoing trailers too.
-		if err := validateHeaders(req.Trailer); err != "" {
-			req.closeBody()
-			return nil, fmt.Errorf("net/http: invalid trailer %s", err)
+		// Validate trailers when the exact provider does not own them.
+		if exactBlocks.trailers == nil {
+			if err := validateHeaders(req.Trailer); err != "" {
+				req.closeBody()
+				return nil, fmt.Errorf("net/http: invalid trailer %s", err)
+			}
 		}
 	}
 
@@ -697,6 +702,20 @@ func (t *Transport) roundTrip(req *Request) (_ *Response, err error) {
 		}
 
 		var resp *Response
+		if config := requestHeaderBlocksToWrite(req.Context()); config.initial != nil {
+			actualProto := 1
+			if pconn.alt != nil {
+				actualProto = 2
+			}
+			if config.proto != actualProto {
+				mismatchErr := fmt.Errorf("net/http: exact request header block is for HTTP/%d, but the connection negotiated HTTP/%d", config.proto, actualProto)
+				if pconn.alt == nil {
+					pconn.close(mismatchErr)
+				}
+				req.closeBody()
+				return nil, mismatchErr
+			}
+		}
 		if pconn.alt != nil {
 			// HTTP/2 path.
 			resp, err = pconn.alt.RoundTrip(req)
@@ -2369,7 +2388,7 @@ func (pc *persistConn) readLoop() {
 		bodyWritable := resp.bodyIsWritable()
 		hasBody := rc.treq.Request.Method != "HEAD" && resp.ContentLength != 0
 
-		if resp.Close || rc.treq.Request.Close || resp.StatusCode <= 199 || bodyWritable {
+		if resp.Close || requestWantsClose(rc.treq.Request) || resp.StatusCode <= 199 || bodyWritable {
 			// Don't do keep-alive on error if either party requested a close
 			// or we get an unexpected informational (1xx) response.
 			// StatusCode 100 is already handled above.
@@ -2514,11 +2533,13 @@ func (pc *persistConn) readResponse(rc requestAndChan, trace *httptrace.ClientTr
 	}
 
 	continueCh := rc.continueCh
+	allHeaderBlocks := &headerBlockStore{}
 	for {
 		resp, err = ReadResponse(pc.br, rc.treq.Request)
 		if err != nil {
 			return
 		}
+		allHeaderBlocks.appendFrom(responseHeaderBlockStore(resp))
 		resCode := resp.StatusCode
 		if continueCh != nil && resCode == StatusContinue {
 			if trace != nil && trace.Got100Continue != nil {
@@ -2531,6 +2552,17 @@ func (pc *persistConn) readResponse(rc requestAndChan, trace *httptrace.ClientTr
 		// treat 101 as a terminal status, see issue 26161
 		is1xxNonTerminal := is1xx && resCode != StatusSwitchingProtocols
 		if is1xxNonTerminal {
+			delivered1xx := false
+			if handler := informationalResponseHandler(rc.treq.Request.Context()); handler != nil {
+				blocks := responseHeaderBlockStore(resp).snapshot()
+				if len(blocks) != 1 {
+					return nil, errors.New("net/http: missing informational response header block")
+				}
+				if err := handler(blocks[0]); err != nil {
+					return nil, err
+				}
+				delivered1xx = true
+			}
 			if trace != nil && trace.Got1xxResponse != nil {
 				if err := trace.Got1xxResponse(resCode, textproto.MIMEHeader(resp.Header)); err != nil {
 					return nil, err
@@ -2543,11 +2575,16 @@ func (pc *persistConn) readResponse(rc requestAndChan, trace *httptrace.ClientTr
 				// limit the size of all headers (including both 1xx
 				// and the final response) to maxHeaderResponseSize.
 				pc.readLimit = pc.maxHeaderResponseSize() // reset the limit
+				delivered1xx = false
+			}
+			if delivered1xx {
+				pc.readLimit = pc.maxHeaderResponseSize()
 			}
 			continue
 		}
 		break
 	}
+	registerResponseHeaderBlocks(resp, allHeaderBlocks)
 	if resp.isProtocolSwitch() {
 		resp.Body = newReadWriteCloserBody(pc.br, pc.conn)
 	}
@@ -2564,7 +2601,7 @@ func (pc *persistConn) readResponse(rc requestAndChan, trace *httptrace.ClientTr
 		// Conceivably, it's one that doesn't need us to send the body.
 		// Given that we'll send the body if ExpectContinueTimeout expires,
 		// be consistent and always send it if we aren't closing the connection.
-		if resp.Close || rc.treq.Request.Close {
+		if resp.Close || requestWantsClose(rc.treq.Request) {
 			close(continueCh) // don't send the body; the connection will close
 		} else {
 			continueCh <- struct{}{} // send the body
@@ -2829,7 +2866,8 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 	headerFn := pc.mutateHeaderFunc
 	pc.mu.Unlock()
 
-	if headerFn != nil {
+	exactRequest := requestHeaderBlocksToWrite(req.Request.Context()).initial != nil
+	if headerFn != nil && !exactRequest {
 		headerFn(req.extraHeaders())
 	}
 
@@ -2838,7 +2876,7 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 	// uncompress the gzip stream if we were the layer that
 	// requested it.
 	requestedGzip := false
-	if !pc.t.DisableCompression &&
+	if !exactRequest && !pc.t.DisableCompression &&
 		req.Header.Get("Accept-Encoding") == "" &&
 		req.Header.Get("Range") == "" &&
 		req.Method != "HEAD" {
@@ -2859,11 +2897,11 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 	}
 
 	var continueCh chan struct{}
-	if req.ProtoAtLeast(1, 1) && req.Body != nil && req.expectsContinue() {
+	if req.ProtoAtLeast(1, 1) && req.Body != nil && requestExpectsContinue(req.Request) {
 		continueCh = make(chan struct{}, 1)
 	}
 
-	if pc.t.DisableKeepAlives &&
+	if !exactRequest && pc.t.DisableKeepAlives &&
 		!req.wantsClose() &&
 		!isProtocolSwitchHeader(req.Header) {
 		req.extraHeaders().Set("Connection", "close")

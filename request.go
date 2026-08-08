@@ -659,6 +659,12 @@ func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitF
 	// TODO: validate r.Method too? At least it's less likely to
 	// come from an attacker (more likely to be a constant in
 	// code).
+	if config := requestHeaderBlocksToWrite(r.Context()); config.initial != nil {
+		if config.proto != 1 {
+			return errors.New("http: exact request header block protocol does not match HTTP/1")
+		}
+		return r.writeExactHTTP1(w, ruri, config, waitForContinue, trace)
+	}
 
 	// Wrap the writer in a bufio Writer if it's not already buffered.
 	// Don't always call NewWriter, as that forces a bytes.Buffer
@@ -675,15 +681,6 @@ func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitF
 		return err
 	}
 
-	// Header lines
-	_, err = fmt.Fprintf(w, "Host: %s\r\n", host)
-	if err != nil {
-		return err
-	}
-	if trace != nil && trace.WroteHeaderField != nil {
-		trace.WroteHeaderField("Host", []string{host})
-	}
-
 	// Use the defaultUserAgent unless the Header contains one, which
 	// may be blank to not send the header.
 	userAgent := defaultUserAgent
@@ -693,34 +690,63 @@ func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitF
 	if userAgent != "" {
 		userAgent = headerNewlineToSpace.Replace(userAgent)
 		userAgent = textproto.TrimString(userAgent)
-		_, err = fmt.Fprintf(w, "User-Agent: %s\r\n", userAgent)
+	}
+
+	var tw *transferWriter
+	order := requestHeaderOrder(r.Context())
+	if len(order.Headers) > 0 {
+		tw, err = newTransferWriter(r)
+		if err != nil {
+			return err
+		}
+		fields := []HeaderField{{Name: "Host", Value: host}}
+		if userAgent != "" {
+			fields = append(fields, HeaderField{Name: "User-Agent", Value: userAgent})
+		}
+		transferFields, transferErr := tw.headerFields()
+		if transferErr != nil {
+			return transferErr
+		}
+		fields = append(fields, transferFields...)
+		fields = append(fields, headerFieldsFromHeader(r.Header, reqWriteExcludeHeader)...)
+		fields = append(fields, headerFieldsFromHeader(extraHeaders, nil)...)
+		if err := writeHTTP1HeaderFields(w, fields, order.Headers, trace); err != nil {
+			return err
+		}
+	} else {
+		// Preserve the legacy zero-configuration path byte-for-byte.
+		_, err = fmt.Fprintf(w, "Host: %s\r\n", host)
 		if err != nil {
 			return err
 		}
 		if trace != nil && trace.WroteHeaderField != nil {
-			trace.WroteHeaderField("User-Agent", []string{userAgent})
+			trace.WroteHeaderField("Host", []string{host})
 		}
-	}
+		if userAgent != "" {
+			_, err = fmt.Fprintf(w, "User-Agent: %s\r\n", userAgent)
+			if err != nil {
+				return err
+			}
+			if trace != nil && trace.WroteHeaderField != nil {
+				trace.WroteHeaderField("User-Agent", []string{userAgent})
+			}
+		}
 
-	// Process Body,ContentLength,Close,Trailer
-	tw, err := newTransferWriter(r)
-	if err != nil {
-		return err
-	}
-	err = tw.writeHeader(w, trace)
-	if err != nil {
-		return err
-	}
-
-	err = r.Header.writeSubset(w, reqWriteExcludeHeader, trace)
-	if err != nil {
-		return err
-	}
-
-	if extraHeaders != nil {
-		err = extraHeaders.write(w, trace)
+		// Process Body,ContentLength,Close,Trailer
+		tw, err = newTransferWriter(r)
 		if err != nil {
 			return err
+		}
+		if err = tw.writeHeader(w, trace); err != nil {
+			return err
+		}
+		if err = r.Header.writeSubset(w, reqWriteExcludeHeader, trace); err != nil {
+			return err
+		}
+		if extraHeaders != nil {
+			if err = extraHeaders.write(w, trace); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -1130,11 +1156,14 @@ func readRequest(b *bufio.Reader) (req *Request, err error) {
 	}
 
 	// Subsequent lines: Key: value.
-	mimeHeader, err := tp.ReadMIMEHeader()
+	mimeHeader, initialBlock, err := readMIMEHeaderBlock(tp, HeaderBlockInitial, 0)
 	if err != nil {
 		return nil, err
 	}
 	req.Header = Header(mimeHeader)
+	blockStore := &headerBlockStore{}
+	blockStore.add(initialBlock)
+	registerRequestHeaderBlocks(req, blockStore)
 	if len(req.Header["Host"]) > 1 {
 		return nil, fmt.Errorf("too many Host headers")
 	}

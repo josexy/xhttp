@@ -8,6 +8,7 @@ package http
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -69,6 +70,35 @@ type http2WriteScheduler any
 func http2NewPriorityWriteScheduler(any) http2WriteScheduler { panic(noHTTP2) }
 
 func http2ConfigureServer(s *Server, conf *http2Server) error { panic(noHTTP2) }
+
+func http2WithRequestHeaderOrderBridge(req *Request, order HeaderOrder) (*Request, error) {
+	return req, nil
+}
+
+func http2SetResponseHeaderOrderBridge(ResponseWriter, HeaderOrder) error {
+	return fmt.Errorf("http: response header order: %w", errors.ErrUnsupported)
+}
+
+func http2RequestHeaderBlocksBridge(*Request) []HeaderBlock   { return nil }
+func http2ResponseHeaderBlocksBridge(*Response) []HeaderBlock { return nil }
+
+func http2WithRequestHeaderBlocksBridge(*Request, HeaderBlock, HeaderBlockFunc) (*Request, error) {
+	return nil, fmt.Errorf("http: exact HTTP/2 request header blocks: %w", errors.ErrUnsupported)
+}
+
+func http2WithInformationalResponseHandlerBridge(req *Request, _ InformationalResponseHandler) (*Request, error) {
+	return req, nil
+}
+
+func http2WriteResponseHeaderBlockBridge(ResponseWriter, HeaderBlock) error {
+	return fmt.Errorf("http: exact HTTP/2 response header block: %w", errors.ErrUnsupported)
+}
+
+func http2SetResponseTrailerBlockBridge(ResponseWriter, HeaderBlock) error {
+	return fmt.Errorf("http: exact HTTP/2 response trailer block: %w", errors.ErrUnsupported)
+}
+
+func http2ClearRequestHeaderBlocksBridge(req *Request) *Request { return req }
 
 var http2ErrNoCachedConn = http2noCachedConnError{}
 

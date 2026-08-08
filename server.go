@@ -414,8 +414,20 @@ func (cw *chunkWriter) close() {
 		bw := cw.res.conn.bufw // conn's bufio writer
 		// zero chunk to mark EOF
 		bw.WriteString("0\r\n")
-		if trailers := cw.res.finalTrailers(); trailers != nil {
-			trailers.Write(bw) // the writer handles noting errors
+		if block := cw.res.exactTrailerBlock; block != nil {
+			writeExactHTTP1Fields(bw, block.Fields, nil)
+		} else if cw.res.exactHeaderBlock != nil {
+			fields := cw.res.exactFallbackTrailerFields()
+			if len(cw.res.headerOrder.Trailers) > 0 {
+				fields = orderHTTP1HeaderFields(fields, cw.res.headerOrder.Trailers)
+			}
+			writeExactHTTP1Fields(bw, fields, nil)
+		} else if trailers := cw.res.finalTrailers(); trailers != nil {
+			if len(cw.res.headerOrder.Trailers) > 0 {
+				writeHTTP1HeaderFields(bw, headerFieldsFromHeader(trailers, nil), cw.res.headerOrder.Trailers, nil)
+			} else {
+				trailers.Write(bw) // the writer handles noting errors
+			}
 		}
 		// final blank line after the trailers (whether
 		// present or not)
@@ -425,13 +437,17 @@ func (cw *chunkWriter) close() {
 
 // A response represents the server side of an HTTP response.
 type response struct {
-	conn             *conn
-	req              *Request // request for this response
-	reqBody          io.ReadCloser
-	cancelCtx        context.CancelFunc // when ServeHTTP exits
-	wroteHeader      bool               // a non-1xx header has been (logically) written
-	wants10KeepAlive bool               // HTTP/1.0 w/ Connection "keep-alive"
-	wantsClose       bool               // HTTP request has Connection "close"
+	conn              *conn
+	req               *Request // request for this response
+	reqBody           io.ReadCloser
+	cancelCtx         context.CancelFunc // when ServeHTTP exits
+	wroteHeader       bool               // a non-1xx header has been (logically) written
+	wants10KeepAlive  bool               // HTTP/1.0 w/ Connection "keep-alive"
+	wantsClose        bool               // HTTP request has Connection "close"
+	headerOrder       HeaderOrder
+	exactHeaderBlock  *HeaderBlock
+	exactTrailerBlock *HeaderBlock
+	exactTrailerNames map[string]bool
 
 	// canWriteContinue is an atomic boolean that says whether or
 	// not a 100 Continue header can be written to the
@@ -1176,7 +1192,11 @@ func (w *response) WriteHeader(code int) {
 		writeStatusLine(w.conn.bufw, w.req.ProtoAtLeast(1, 1), code, w.statusBuf[:])
 
 		// Per RFC 8297 we must not clear the current header map
-		w.handlerHeader.WriteSubset(w.conn.bufw, excludedHeadersNoBody)
+		if len(w.headerOrder.Headers) > 0 {
+			writeHTTP1HeaderFields(w.conn.bufw, headerFieldsFromHeader(w.handlerHeader, excludedHeadersNoBody), w.headerOrder.Headers, nil)
+		} else {
+			w.handlerHeader.WriteSubset(w.conn.bufw, excludedHeadersNoBody)
+		}
 		w.conn.bufw.Write(crlf)
 		w.conn.bufw.Flush()
 
@@ -1210,6 +1230,22 @@ type extraHeader struct {
 	transferEncoding string
 	date             []byte // written if not nil
 	contentLength    []byte // written if not nil
+}
+
+func (h extraHeader) headerFields() []HeaderField {
+	fields := make([]HeaderField, 0, 5)
+	if h.date != nil {
+		fields = append(fields, HeaderField{Name: "Date", Value: string(h.date)})
+	}
+	if h.contentLength != nil {
+		fields = append(fields, HeaderField{Name: "Content-Length", Value: string(h.contentLength)})
+	}
+	for i, value := range []string{h.contentType, h.connection, h.transferEncoding} {
+		if value != "" {
+			fields = append(fields, HeaderField{Name: string(extraHeaderKeys[i]), Value: value})
+		}
+	}
+	return fields
 }
 
 // Sorted the same as extraHeader.Write's loop.
@@ -1265,6 +1301,13 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 	cw.wroteHeader = true
 
 	w := cw.res
+	if w.exactHeaderBlock != nil {
+		w.prepareRequestBodyForExactResponse()
+		writeStatusLine(w.conn.bufw, w.req.ProtoAtLeast(1, 1), w.status, w.statusBuf[:])
+		writeExactHTTP1Fields(w.conn.bufw, w.exactHeaderBlock.Fields, nil)
+		w.conn.bufw.Write(crlf)
+		return
+	}
 	keepAlivesEnabled := w.conn.server.doKeepAlives()
 	isHEAD := w.req.Method == "HEAD"
 
@@ -1533,9 +1576,29 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 	}
 
 	writeStatusLine(w.conn.bufw, w.req.ProtoAtLeast(1, 1), code, w.statusBuf[:])
-	cw.header.WriteSubset(w.conn.bufw, excludeHeader)
-	setHeader.Write(w.conn.bufw)
+	if len(w.headerOrder.Headers) > 0 {
+		fields := headerFieldsFromHeader(cw.header, excludeHeader)
+		fields = append(fields, setHeader.headerFields()...)
+		writeHTTP1HeaderFields(w.conn.bufw, fields, w.headerOrder.Headers, nil)
+	} else {
+		cw.header.WriteSubset(w.conn.bufw, excludeHeader)
+		setHeader.Write(w.conn.bufw)
+	}
 	w.conn.bufw.Write(crlf)
+}
+
+func (w *response) setHTTP1HeaderOrder(order HeaderOrder) error {
+	if w.wroteHeader || w.cw.wroteHeader {
+		return errors.New("http: response header order set after headers were written")
+	}
+	if len(order.Headers) > 0 && w.exactHeaderBlock != nil || len(order.Trailers) > 0 && w.exactTrailerBlock != nil {
+		return errors.New("http: response header order conflicts with an exact header block")
+	}
+	w.headerOrder = HeaderOrder{
+		Headers:  append([]string(nil), order.Headers...),
+		Trailers: append([]string(nil), order.Trailers...),
+	}
+	return nil
 }
 
 // foreachHeaderElement splits v according to the "#rule" construction

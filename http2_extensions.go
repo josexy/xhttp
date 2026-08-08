@@ -6,6 +6,8 @@
 
 package http
 
+import "context"
+
 // SettingID is an HTTP/2 setting identifier.
 type SettingID uint16
 
@@ -46,70 +48,30 @@ func (s Setting) http2() http2Setting {
 	return http2Setting{ID: http2SettingID(s.ID), Val: s.Val}
 }
 
-// HeaderField is a decoded HTTP/2 header field. Name is the lowercase field
-// name used on the wire. Sensitive reports whether HPACK's never-indexed
-// representation was used.
-type HeaderField struct {
-	Name      string
-	Value     string
-	Sensitive bool
+func (order HeaderOrder) http2() http2HeaderOrder {
+	return http2HeaderOrder{
+		Headers:  append([]string(nil), order.Headers...),
+		Trailers: append([]string(nil), order.Trailers...),
+	}
 }
 
-// HeaderBlockKind identifies the role of an HTTP/2 HEADERS block.
-type HeaderBlockKind uint8
-
-const (
-	HeaderBlockInitial       HeaderBlockKind = HeaderBlockKind(http2HeaderBlockInitial)
-	HeaderBlockInformational HeaderBlockKind = HeaderBlockKind(http2HeaderBlockInformational)
-	HeaderBlockTrailer       HeaderBlockKind = HeaderBlockKind(http2HeaderBlockTrailer)
-)
-
-// HeaderBlock contains the fields decoded from one HTTP/2 HEADERS block.
-// Fields retain their wire order, including pseudo-header fields and repeated
-// field names. Truncated reports that the configured header-list limit was
-// reached and Fields is incomplete.
-type HeaderBlock struct {
-	Kind      HeaderBlockKind
-	Fields    []HeaderField
-	Truncated bool
-}
-
-// HeaderBlockFunc returns a header block when it is ready. It is used by
-// WithRequestHeaderBlocks for request trailers.
-type HeaderBlockFunc func() (HeaderBlock, error)
-
-// InformationalResponseHandler handles one HTTP/2 1xx response header block.
-type InformationalResponseHandler func(HeaderBlock) error
-
-// HeaderOrder specifies the order in which HTTP/2 fields are written.
-type HeaderOrder struct {
-	Headers  []string
-	Trailers []string
-}
-
-// RequestHeaderBlocks returns a snapshot of the HTTP/2 header blocks received
-// for r. It returns nil for requests not created by the bundled HTTP/2
-// implementation.
-func RequestHeaderBlocks(r *Request) []HeaderBlock {
-	return publicHeaderBlocks(http2RequestHeaderBlocks(r))
-}
-
-// ResponseHeaderBlocks returns a snapshot of the HTTP/2 header blocks received
-// for resp. It returns nil for responses not created by the bundled HTTP/2
-// implementation.
-func ResponseHeaderBlocks(resp *Response) []HeaderBlock {
-	return publicHeaderBlocks(http2ResponseHeaderBlocks(resp))
-}
-
-// WithRequestHeaderOrder returns a shallow copy of req whose HTTP/2 initial
-// headers and trailers are written in order.
-func WithRequestHeaderOrder(req *Request, order HeaderOrder) (*Request, error) {
+func http2WithRequestHeaderOrderBridge(req *Request, order HeaderOrder) (*Request, error) {
 	return http2WithRequestHeaderOrder(req, order.http2())
 }
 
-// WithRequestHeaderBlocks returns a shallow copy of req whose HTTP/2 initial
-// header block and optional trailer block are written exactly as supplied.
-func WithRequestHeaderBlocks(req *Request, initial HeaderBlock, trailers HeaderBlockFunc) (*Request, error) {
+func http2SetResponseHeaderOrderBridge(w ResponseWriter, order HeaderOrder) error {
+	return http2SetResponseHeaderOrder(w, order.http2())
+}
+
+func http2RequestHeaderBlocksBridge(r *Request) []HeaderBlock {
+	return publicHeaderBlocks(http2RequestHeaderBlocks(r))
+}
+
+func http2ResponseHeaderBlocksBridge(resp *Response) []HeaderBlock {
+	return publicHeaderBlocks(http2ResponseHeaderBlocks(resp))
+}
+
+func http2WithRequestHeaderBlocksBridge(req *Request, initial HeaderBlock, trailers HeaderBlockFunc) (*Request, error) {
 	var http2Trailers http2HeaderBlockFunc
 	if trailers != nil {
 		http2Trailers = func() (http2HeaderBlock, error) {
@@ -120,40 +82,23 @@ func WithRequestHeaderBlocks(req *Request, initial HeaderBlock, trailers HeaderB
 	return http2WithRequestHeaderBlocks(req, initial.http2(), http2Trailers)
 }
 
-// WithInformationalResponseHandler returns a shallow copy of req for which
-// handler is called with every HTTP/2 1xx response block as it is received.
-func WithInformationalResponseHandler(req *Request, handler InformationalResponseHandler) (*Request, error) {
-	if handler == nil {
-		return http2WithInformationalResponseHandler(req, nil)
-	}
+func http2WithInformationalResponseHandlerBridge(req *Request, handler InformationalResponseHandler) (*Request, error) {
 	return http2WithInformationalResponseHandler(req, func(block http2HeaderBlock) error {
 		return handler(publicHeaderBlock(block))
 	})
 }
 
-// SetResponseHeaderOrder configures the order of response headers and trailers
-// written by w.
-func SetResponseHeaderOrder(w ResponseWriter, order HeaderOrder) error {
-	return http2SetResponseHeaderOrder(w, order.http2())
-}
-
-// WriteResponseHeaderBlock writes an informational response block or commits
-// a final response block using block.Fields exactly.
-func WriteResponseHeaderBlock(w ResponseWriter, block HeaderBlock) error {
+func http2WriteResponseHeaderBlockBridge(w ResponseWriter, block HeaderBlock) error {
 	return http2WriteResponseHeaderBlock(w, block.http2())
 }
 
-// SetResponseTrailerBlock configures the exact HTTP/2 trailer block sent when
-// the handler finishes.
-func SetResponseTrailerBlock(w ResponseWriter, block HeaderBlock) error {
+func http2SetResponseTrailerBlockBridge(w ResponseWriter, block HeaderBlock) error {
 	return http2SetResponseTrailerBlock(w, block.http2())
 }
 
-func (order HeaderOrder) http2() http2HeaderOrder {
-	return http2HeaderOrder{
-		Headers:  append([]string(nil), order.Headers...),
-		Trailers: append([]string(nil), order.Trailers...),
-	}
+func http2ClearRequestHeaderBlocksBridge(req *Request) *Request {
+	ctx := context.WithValue(req.Context(), http2requestHeaderBlocksWriteContextKey{}, http2requestHeaderBlocksWriteConfig{})
+	return req.WithContext(ctx)
 }
 
 func (block HeaderBlock) http2() http2HeaderBlock {

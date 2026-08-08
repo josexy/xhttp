@@ -7,12 +7,87 @@
 package http_test
 
 import (
+	"io"
 	"reflect"
+	"sync/atomic"
 	"testing"
 
 	"github.com/josexy/xhttp"
 	"github.com/josexy/xhttp/httptest"
 )
+
+func TestHTTP1ExactRequestRejectedOnNegotiatedHTTP2(t *testing.T) {
+	var called atomic.Bool
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called.Store(true)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+
+	req, err := http.NewRequest("GET", server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err = http.WithRequestHeaderBlocks(req, http.HeaderBlock{
+		Kind:       http.HeaderBlockInitial,
+		ProtoMajor: 1,
+		Fields:     []http.HeaderField{{Name: "Host", Value: req.URL.Host}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.Client().Do(req); err == nil {
+		t.Fatal("HTTP/1 exact block unexpectedly sent over HTTP/2")
+	}
+	if called.Load() {
+		t.Fatal("server handler ran despite protocol mismatch")
+	}
+}
+
+func TestHTTP2TrailerBlockWithZeroMetadataStillDispatches(t *testing.T) {
+	errCh := make(chan error, 2)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := http.WriteResponseHeaderBlock(w, http.HeaderBlock{
+			Kind: http.HeaderBlockInitial,
+			Fields: []http.HeaderField{
+				{Name: ":status", Value: "200"},
+				{Name: "x-initial", Value: "yes"},
+			},
+		}); err != nil {
+			errCh <- err
+			return
+		}
+		if _, err := w.Write([]byte("ok")); err != nil {
+			errCh <- err
+			return
+		}
+		errCh <- http.SetResponseTrailerBlock(w, http.HeaderBlock{
+			Kind:   http.HeaderBlockTrailer,
+			Fields: []http.HeaderField{{Name: "x-trailer", Value: "done"}},
+		})
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+
+	resp, err := server.Client().Get(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadAll(resp.Body); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	blocks := http.ResponseHeaderBlocks(resp)
+	if len(blocks) != 2 || blocks[1].Kind != http.HeaderBlockTrailer || blocks[1].ProtoMajor != 0 {
+		t.Fatalf("blocks = %#v", blocks)
+	}
+}
 
 func TestHTTP2FingerprintExtensions(t *testing.T) {
 	fingerprint := http.Fingerprint{

@@ -696,6 +696,10 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
 			if ref := refererForURL(reqs[len(reqs)-1].URL, req.URL, req.Header.Get("Referer")); ref != "" {
 				req.Header.Set("Referer", ref)
 			}
+			// Exact blocks belong to one wire request. Redirects construct a
+			// new request and intentionally clear them before CheckRedirect,
+			// where callers may bind a block for the new target.
+			req = clearRequestHeaderBlocksForRedirect(req)
 			err = c.checkRedirect(req, reqs)
 
 			// Sentinel error to let users select the

@@ -73,6 +73,7 @@ type transferWriter struct {
 
 	FlushHeaders bool            // flush headers to network before body
 	ByteReadCh   chan readResult // non-nil if probeRequestBody called
+	TrailerOrder []string
 }
 
 func newTransferWriter(r any) (t *transferWriter, err error) {
@@ -93,6 +94,7 @@ func newTransferWriter(r any) (t *transferWriter, err error) {
 		t.Body = rr.Body
 		t.BodyCloser = rr.Body
 		t.ContentLength = rr.outgoingLength()
+		t.TrailerOrder = requestHeaderOrder(rr.Context()).Trailers
 		if t.ContentLength < 0 && len(t.TransferEncoding) == 0 && t.shouldSendChunkedRequestBody() {
 			t.TransferEncoding = []string{"chunked"}
 		}
@@ -147,6 +149,34 @@ func newTransferWriter(r any) (t *transferWriter, err error) {
 	}
 
 	return t, nil
+}
+
+func (t *transferWriter) headerFields() ([]HeaderField, error) {
+	var fields []HeaderField
+	if t.Close && !hasToken(t.Header.get("Connection"), "close") {
+		fields = append(fields, HeaderField{Name: "Connection", Value: "close"})
+	}
+	if t.shouldSendContentLength() {
+		fields = append(fields, HeaderField{Name: "Content-Length", Value: strconv.FormatInt(t.ContentLength, 10)})
+	} else if chunked(t.TransferEncoding) {
+		fields = append(fields, HeaderField{Name: "Transfer-Encoding", Value: "chunked"})
+	}
+	if t.Trailer != nil {
+		keys := make([]string, 0, len(t.Trailer))
+		for key := range t.Trailer {
+			key = CanonicalHeaderKey(key)
+			switch key {
+			case "Transfer-Encoding", "Trailer", "Content-Length":
+				return nil, badStringError("invalid Trailer key", key)
+			}
+			keys = append(keys, key)
+		}
+		if len(keys) > 0 {
+			slices.Sort(keys)
+			fields = append(fields, HeaderField{Name: "Trailer", Value: strings.Join(keys, ",")})
+		}
+	}
+	return fields, nil
 }
 
 // shouldSendChunkedRequestBody reports whether we should try to send a
@@ -396,7 +426,13 @@ func (t *transferWriter) writeBody(w io.Writer) (err error) {
 	if !t.ResponseToHEAD && chunked(t.TransferEncoding) {
 		// Write Trailer header
 		if t.Trailer != nil {
-			if err := t.Trailer.Write(w); err != nil {
+			var err error
+			if len(t.TrailerOrder) > 0 {
+				err = writeHTTP1HeaderFields(w, headerFieldsFromHeader(t.Trailer, nil), t.TrailerOrder, nil)
+			} else {
+				err = t.Trailer.Write(w)
+			}
+			if err != nil {
 				return err
 			}
 		}
@@ -934,7 +970,7 @@ func (b *body) readTrailer() error {
 		return errors.New("http: suspiciously long trailer after chunked body")
 	}
 
-	hdr, err := textproto.NewReader(b.r).ReadMIMEHeader()
+	hdr, trailerBlock, err := readMIMEHeaderBlock(textproto.NewReader(b.r), HeaderBlockTrailer, 0)
 	if err != nil {
 		if err == io.EOF {
 			return errTrailerEOF
@@ -944,8 +980,14 @@ func (b *body) readTrailer() error {
 	switch rr := b.hdr.(type) {
 	case *Request:
 		mergeSetHeader(&rr.Trailer, Header(hdr))
+		if len(trailerBlock.Fields) > 0 {
+			requestHeaderBlockStore(rr).add(trailerBlock)
+		}
 	case *Response:
 		mergeSetHeader(&rr.Trailer, Header(hdr))
+		if len(trailerBlock.Fields) > 0 {
+			responseHeaderBlockStore(rr).add(trailerBlock)
+		}
 	}
 	return nil
 }
