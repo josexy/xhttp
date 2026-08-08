@@ -2,7 +2,9 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:generate bundle -o=h2_bundle.go -prefix=http2 -tags=!nethttpomithttp2 -import=golang.org/x/net/internal/httpcommon=github.com/josexy/xhttp/internal/httpcommon golang.org/x/net/http2
+// github.com/josexy/net/http2 selects its legacy implementation by Go version;
+// regenerate this bundle with Go 1.26 to retain the extension APIs below.
+//go:generate go run golang.org/x/tools/cmd/bundle@v0.44.0 -dst=net/http -pkg=http -o=h2_bundle.go -prefix=http2 -tags=!nethttpomithttp2 -import=net/http/httptrace=github.com/josexy/xhttp/httptrace -import=github.com/josexy/net/internal/httpcommon=github.com/josexy/xhttp/internal/httpcommon -import=github.com/josexy/net/internal/httpsfv=github.com/josexy/xhttp/internal/httpsfv github.com/josexy/net/http2
 
 package http
 
@@ -13,7 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"golang.org/x/net/http/httpguts"
+	"github.com/josexy/net/http/httpguts"
 )
 
 // Protocols is a set of HTTP protocols.

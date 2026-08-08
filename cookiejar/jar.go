@@ -33,7 +33,7 @@ import (
 // set a cookie for bar.com.
 //
 // A public suffix list implementation is in the package
-// golang.org/x/net/publicsuffix.
+// github.com/josexy/net/publicsuffix.
 type PublicSuffixList interface {
 	// PublicSuffix returns the public suffix of domain.
 	//

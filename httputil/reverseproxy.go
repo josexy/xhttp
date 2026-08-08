@@ -25,7 +25,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/net/http/httpguts"
+	"github.com/josexy/net/http/httpguts"
 )
 
 // A ProxyRequest contains a request to be rewritten by a [ReverseProxy].

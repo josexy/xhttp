@@ -33,7 +33,7 @@ import (
 	"time"
 	_ "unsafe" // for linkname
 
-	"golang.org/x/net/http/httpguts"
+	"github.com/josexy/net/http/httpguts"
 )
 
 // Errors used by the HTTP server.
@@ -3768,7 +3768,7 @@ func (s *Server) onceSetNextProtoDefaults() {
 	}
 	if _, ok := s.TLSNextProto["h2"]; ok {
 		// TLSNextProto already contains an HTTP/2 implementation.
-		// The user probably called golang.org/x/net/http2.ConfigureServer
+		// The user probably called github.com/josexy/net/http2.ConfigureServer
 		// to add it.
 		return
 	}

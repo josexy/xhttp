@@ -34,8 +34,8 @@ import (
 	"time"
 	_ "unsafe"
 
-	"golang.org/x/net/http/httpguts"
-	"golang.org/x/net/http/httpproxy"
+	"github.com/josexy/net/http/httpguts"
+	"github.com/josexy/net/http/httpproxy"
 )
 
 // DefaultTransport is the default implementation of [Transport] and is
@@ -406,7 +406,7 @@ func (t *Transport) onceSetNextProtoDefaults() {
 	}
 
 	// If they've already configured http2 with
-	// golang.org/x/net/http2 instead of the bundled copy, try to
+	// github.com/josexy/net/http2 instead of the bundled copy, try to
 	// get at its http2.Transport value (via the "https"
 	// altproto map) so we can call CloseIdleConnections on it if
 	// requested. (Issue 22891)
@@ -1954,7 +1954,7 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod, isClientConn
 		altProto, _ := t.altProto.Load().(map[string]RoundTripper)
 		h2, ok := altProto["https"].(newClientConner)
 		if !ok {
-			return nil, errors.New("http: HTTP/2 implementation does not support NewClientConn (update golang.org/x/net?)")
+			return nil, errors.New("http: HTTP/2 implementation does not support NewClientConn (update github.com/josexy/net?)")
 		}
 		alt, err := h2.NewClientConn(pconn.conn, internalStateHook)
 		if err != nil {

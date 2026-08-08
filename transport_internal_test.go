@@ -107,7 +107,7 @@ func dummyRequestWithBodyNoGetBody(method string) *Request {
 	return req
 }
 
-// issue22091Error acts like a golang.org/x/net/http2.ErrNoCachedConn.
+// issue22091Error acts like a github.com/josexy/net/http2.ErrNoCachedConn.
 type issue22091Error struct{}
 
 func (issue22091Error) IsHTTP2NoCachedConnError() {}
