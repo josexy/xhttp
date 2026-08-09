@@ -1,4 +1,4 @@
-github.com/josexy/net v0.0.0-20260809084431-597a8f45c170 h1:/KyGXYWllvU9zLdsavg6kJ2/FUnRATpulr6sMsgPoPI=
-github.com/josexy/net v0.0.0-20260809084431-597a8f45c170/go.mod h1:nqn+D8/6jgN5iDXRZanT2wuiawN677nn4Wnn7mgdr0A=
+github.com/josexy/net v0.0.0-20260809092324-c0d6b15b8e7b h1:Wvj0rSQ+WISVjpMnx2Wci0nrRb9yAL444HaMbAWs5xk=
+github.com/josexy/net v0.0.0-20260809092324-c0d6b15b8e7b/go.mod h1:U2/ek4YggQo15z4uwJcTmV/8S7EPplb9K4KQlAA0j2I=
 golang.org/x/text v0.40.0 h1:Ub2Z6/xjgF1WrYQz2nuITOEegKFtiIy+rieRJ5lHZKs=
 golang.org/x/text v0.40.0/go.mod h1:hpnzDAfGV753zIKo+wk3u1bVKCGPbrnF7+7LBF/UHVY=
