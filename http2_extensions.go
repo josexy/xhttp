@@ -146,13 +146,26 @@ type Fingerprint struct {
 	Settings          []Setting
 	WindowUpdate      uint32
 	Priorities        []FingerprintPriority
+	HeaderPriority    *FingerprintHeaderPriority
 	PseudoHeaderOrder []string
 }
 
-// FingerprintPriority is one priority entry in an HTTP/2 fingerprint. Weight
-// is the RFC 7540 weight in the range 1..256.
+// FingerprintPriority is one priority entry in an HTTP/2 fingerprint.
+// Entries in Fingerprint.Priorities were sent as standalone PRIORITY frames.
+// Weight is the RFC 7540 weight in the range 1..256.
 type FingerprintPriority struct {
 	StreamID  uint32
+	StreamDep uint32
+	Exclusive bool
+	Weight    uint16
+}
+
+// FingerprintHeaderPriority is the RFC 7540 priority information carried by
+// this request's initial HEADERS frame. Its stream ID is allocated by the
+// outgoing connection and is not part of this value. Header priority is
+// excluded from the canonical fingerprint String and Hash. Weight is in the
+// semantic RFC 7540 range 1..256.
+type FingerprintHeaderPriority struct {
 	StreamDep uint32
 	Exclusive bool
 	Weight    uint16
@@ -164,17 +177,21 @@ func (f Fingerprint) Validate() error {
 	return f.http2().Validate()
 }
 
-// String returns the canonical HTTP/2 fingerprint string.
+// String returns the canonical four-part HTTP/2 fingerprint string.
+// It deliberately excludes HeaderPriority.
 func (f Fingerprint) String() string {
 	return f.http2().String()
 }
 
-// Hash returns the lowercase hexadecimal MD5 of String.
+// Hash returns the lowercase hexadecimal MD5 of String and deliberately
+// excludes HeaderPriority.
 func (f Fingerprint) Hash() string {
 	return f.http2().Hash()
 }
 
-// ParseFingerprint parses and validates a four-part HTTP/2 fingerprint string.
+// ParseFingerprint parses and validates a canonical four-part HTTP/2
+// fingerprint string. The returned Fingerprint has a nil HeaderPriority,
+// because that request-scoped metadata is not encoded by String.
 func ParseFingerprint(value string) (Fingerprint, error) {
 	fingerprint, err := http2ParseFingerprint(value)
 	if err != nil {
@@ -215,6 +232,10 @@ func (f Fingerprint) http2() http2Fingerprint {
 	for i, priority := range f.Priorities {
 		converted.Priorities[i] = http2FingerprintPriority(priority)
 	}
+	if f.HeaderPriority != nil {
+		priority := http2FingerprintHeaderPriority(*f.HeaderPriority)
+		converted.HeaderPriority = &priority
+	}
 	return converted
 }
 
@@ -234,6 +255,10 @@ func publicFingerprint(f http2Fingerprint) Fingerprint {
 	}
 	for i, priority := range f.Priorities {
 		converted.Priorities[i] = FingerprintPriority(priority)
+	}
+	if f.HeaderPriority != nil {
+		priority := FingerprintHeaderPriority(*f.HeaderPriority)
+		converted.HeaderPriority = &priority
 	}
 	return converted
 }

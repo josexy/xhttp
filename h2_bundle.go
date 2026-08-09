@@ -780,13 +780,13 @@ const (
 
 func (p *http2clientConnPool) getClientConn(req *Request, addr string, dialOnMiss bool) (*http2ClientConn, error) {
 	poolKey := addr
+	config, hasFingerprint := http2fingerprintWriteConfigFromContext(req.Context())
 	var fingerprint *http2Fingerprint
-	if f, ok := http2fingerprintToWriteFromContext(req.Context()); ok {
-		f = http2cloneFingerprint(f)
-		fingerprint = &f
+	if hasFingerprint {
+		fingerprint = &config.fingerprint
 		// authorityAddr cannot contain NUL, so this delimiter cannot
 		// collide with an ordinary address-only pool key.
-		poolKey += "\x00" + http2connectionFingerprintKey(f)
+		poolKey += "\x00" + config.connectionKey
 	}
 	// TODO(dneil): Dial a new connection when t.DisableKeepAlives is set?
 	if http2isConnectionCloseRequest(req) && dialOnMiss {
@@ -1552,10 +1552,12 @@ type http2Fingerprint struct {
 	Settings          []http2Setting
 	WindowUpdate      uint32
 	Priorities        []http2FingerprintPriority
+	HeaderPriority    *http2FingerprintHeaderPriority
 	PseudoHeaderOrder []string
 }
 
 // FingerprintPriority is one priority entry in an HTTP/2 fingerprint.
+// Entries in Fingerprint.Priorities were sent as standalone PRIORITY frames.
 // Weight is the RFC 7540 weight in the range 1..256, rather than the
 // zero-indexed byte stored in PriorityParam.Weight.
 type http2FingerprintPriority struct {
@@ -1565,9 +1567,32 @@ type http2FingerprintPriority struct {
 	Weight    uint16
 }
 
+// FingerprintHeaderPriority is the RFC 7540 priority information carried by
+// this request's initial HEADERS frame. The stream ID belongs to the HEADERS
+// frame itself and is deliberately not stored here; replay uses the stream ID
+// allocated by the outgoing connection.
+//
+// Header priority is request-scoped replay metadata. It is deliberately
+// excluded from Fingerprint.String and Fingerprint.Hash, which retain the
+// canonical four-part fingerprint representation of standalone PRIORITY
+// frames. Weight is the semantic RFC 7540 value in the range 1..256.
+type http2FingerprintHeaderPriority struct {
+	StreamDep uint32
+	Exclusive bool
+	Weight    uint16
+}
+
 type http2requestFingerprintContextKey struct{}
 
 type http2requestFingerprintWriteContextKey struct{}
+
+// requestFingerprintWriteConfig is immutable after it is stored in a request
+// context. The precomputed connection key is shared by pool lookup and stream
+// creation so neither path needs to clone or serialize the fingerprint again.
+type http2requestFingerprintWriteConfig struct {
+	fingerprint   http2Fingerprint
+	connectionKey string
+}
 
 var http2fingerprintPseudoHeaderToken = map[string]string{
 	":method":    "m",
@@ -1610,17 +1635,16 @@ func (f http2Fingerprint) Validate() error {
 	}
 
 	for i, priority := range f.Priorities {
-		if !http2validStreamID(priority.StreamID) {
-			return fmt.Errorf("http2: invalid fingerprint priority %d stream ID %d", i, priority.StreamID)
+		if err := http2validateFingerprintPriority(i, priority); err != nil {
+			return err
 		}
-		if !http2validStreamIDOrZero(priority.StreamDep) {
-			return fmt.Errorf("http2: invalid fingerprint priority %d dependency %d", i, priority.StreamDep)
+	}
+	if f.HeaderPriority != nil {
+		if !http2validStreamIDOrZero(f.HeaderPriority.StreamDep) {
+			return fmt.Errorf("http2: invalid fingerprint HEADERS priority dependency %d", f.HeaderPriority.StreamDep)
 		}
-		if priority.StreamID == priority.StreamDep {
-			return fmt.Errorf("http2: invalid fingerprint priority %d self-dependency", i)
-		}
-		if priority.Weight < 1 || priority.Weight > 256 {
-			return fmt.Errorf("http2: invalid fingerprint priority %d weight %d", i, priority.Weight)
+		if f.HeaderPriority.Weight < 1 || f.HeaderPriority.Weight > 256 {
+			return fmt.Errorf("http2: invalid fingerprint HEADERS priority weight %d", f.HeaderPriority.Weight)
 		}
 	}
 
@@ -1640,8 +1664,26 @@ func (f http2Fingerprint) Validate() error {
 	return nil
 }
 
-// String returns the canonical HTTP/2 fingerprint string. Callers that
-// construct fingerprints manually should call Validate before using String.
+func http2validateFingerprintPriority(index int, priority http2FingerprintPriority) error {
+	if !http2validStreamID(priority.StreamID) {
+		return fmt.Errorf("http2: invalid fingerprint priority %d stream ID %d", index, priority.StreamID)
+	}
+	if !http2validStreamIDOrZero(priority.StreamDep) {
+		return fmt.Errorf("http2: invalid fingerprint priority %d dependency %d", index, priority.StreamDep)
+	}
+	if priority.StreamID == priority.StreamDep {
+		return fmt.Errorf("http2: invalid fingerprint priority %d self-dependency", index)
+	}
+	if priority.Weight < 1 || priority.Weight > 256 {
+		return fmt.Errorf("http2: invalid fingerprint priority %d weight %d", index, priority.Weight)
+	}
+	return nil
+}
+
+// String returns the canonical four-part HTTP/2 fingerprint string.
+// HeaderPriority is request-scoped replay metadata and is intentionally not
+// included. Callers that construct fingerprints manually should call Validate
+// before using String.
 func (f http2Fingerprint) String() string {
 	var b strings.Builder
 	for i, setting := range f.Settings {
@@ -1695,13 +1737,16 @@ func (f http2Fingerprint) String() string {
 	return b.String()
 }
 
-// Hash returns the lowercase hexadecimal MD5 of String.
+// Hash returns the lowercase hexadecimal MD5 of the canonical fingerprint string.
+// Like String, it deliberately excludes HeaderPriority.
 func (f http2Fingerprint) Hash() string {
 	sum := md5.Sum([]byte(f.String()))
 	return hex.EncodeToString(sum[:])
 }
 
-// ParseFingerprint parses and validates a four-part HTTP/2 fingerprint string.
+// ParseFingerprint parses and validates a canonical four-part HTTP/2
+// fingerprint string. The returned Fingerprint has a nil HeaderPriority,
+// because that request-scoped metadata is not encoded by String.
 func http2ParseFingerprint(value string) (http2Fingerprint, error) {
 	parts := strings.Split(value, "|")
 	if len(parts) != 4 {
@@ -1821,13 +1866,21 @@ func http2WithRequestFingerprint(req *Request, f http2Fingerprint) (*Request, er
 			return nil, err
 		}
 	}
-	ctx := context.WithValue(req.Context(), http2requestFingerprintWriteContextKey{}, f)
+	config := &http2requestFingerprintWriteConfig{
+		fingerprint:   f,
+		connectionKey: http2connectionFingerprintKey(f),
+	}
+	ctx := context.WithValue(req.Context(), http2requestFingerprintWriteContextKey{}, config)
 	return req.WithContext(ctx), nil
 }
 
 func http2cloneFingerprint(f http2Fingerprint) http2Fingerprint {
 	f.Settings = append([]http2Setting(nil), f.Settings...)
 	f.Priorities = append([]http2FingerprintPriority(nil), f.Priorities...)
+	if f.HeaderPriority != nil {
+		priority := *f.HeaderPriority
+		f.HeaderPriority = &priority
+	}
 	f.PseudoHeaderOrder = append([]string(nil), f.PseudoHeaderOrder...)
 	return f
 }
@@ -1841,8 +1894,16 @@ func http2fingerprintFromContext(ctx context.Context) (http2Fingerprint, bool) {
 }
 
 func http2fingerprintToWriteFromContext(ctx context.Context) (http2Fingerprint, bool) {
-	f, ok := ctx.Value(http2requestFingerprintWriteContextKey{}).(http2Fingerprint)
-	return f, ok
+	config, ok := http2fingerprintWriteConfigFromContext(ctx)
+	if !ok {
+		return http2Fingerprint{}, false
+	}
+	return config.fingerprint, true
+}
+
+func http2fingerprintWriteConfigFromContext(ctx context.Context) (*http2requestFingerprintWriteConfig, bool) {
+	config, ok := ctx.Value(http2requestFingerprintWriteContextKey{}).(*http2requestFingerprintWriteConfig)
+	return config, ok && config != nil
 }
 
 func http2contextWithRequestFingerprint(ctx context.Context, f http2Fingerprint) context.Context {
@@ -1850,6 +1911,7 @@ func http2contextWithRequestFingerprint(ctx context.Context, f http2Fingerprint)
 }
 
 func http2connectionFingerprintKey(f http2Fingerprint) string {
+	f.HeaderPriority = nil
 	f.PseudoHeaderOrder = nil
 	return f.String()
 }
@@ -1962,11 +2024,12 @@ func (c *http2fingerprintCollector) freeze() {
 	c.frozen = true
 }
 
-func (c *http2fingerprintCollector) fingerprint(fields []hpack.HeaderField) http2Fingerprint {
+func (c *http2fingerprintCollector) fingerprint(fields []hpack.HeaderField, headerPriority *http2FingerprintHeaderPriority) http2Fingerprint {
 	f := http2Fingerprint{
-		Settings:     append([]http2Setting(nil), c.settings...),
-		WindowUpdate: c.windowUpdate,
-		Priorities:   append([]http2FingerprintPriority(nil), c.priorities...),
+		Settings:       append([]http2Setting(nil), c.settings...),
+		WindowUpdate:   c.windowUpdate,
+		Priorities:     append([]http2FingerprintPriority(nil), c.priorities...),
+		HeaderPriority: headerPriority,
 	}
 	for _, field := range fields {
 		if !field.IsPseudo() {
@@ -1975,6 +2038,14 @@ func (c *http2fingerprintCollector) fingerprint(fields []hpack.HeaderField) http
 		f.PseudoHeaderOrder = append(f.PseudoHeaderOrder, field.Name)
 	}
 	return f
+}
+
+func http2fingerprintHeaderPriority(p http2PriorityParam) http2FingerprintHeaderPriority {
+	return http2FingerprintHeaderPriority{
+		StreamDep: p.StreamDep,
+		Exclusive: p.Exclusive,
+		Weight:    uint16(p.Weight) + 1,
+	}
 }
 
 const http2fingerprintSupported = true
@@ -3207,8 +3278,11 @@ type http2HeadersFrameParam struct {
 	PadLength uint8
 
 	// Priority, if non-zero, includes stream priority information
-	// in the HEADER frame.
-	Priority http2PriorityParam
+	// in the HEADERS frame. PriorityPresent forces the priority fields to be
+	// included even when Priority is the all-zero value (dependency stream 0,
+	// non-exclusive, and wire weight 0), which is itself a valid priority.
+	Priority        http2PriorityParam
+	PriorityPresent bool
 }
 
 // WriteHeaders writes a single HEADERS frame.
@@ -3233,14 +3307,15 @@ func (f *http2Framer) WriteHeaders(p http2HeadersFrameParam) error {
 	if p.EndHeaders {
 		flags |= http2FlagHeadersEndHeaders
 	}
-	if !p.Priority.IsZero() {
+	hasPriority := p.PriorityPresent || !p.Priority.IsZero()
+	if hasPriority {
 		flags |= http2FlagHeadersPriority
 	}
 	f.startWrite(http2FrameHeaders, flags, p.StreamID)
 	if p.PadLength != 0 {
 		f.writeByte(p.PadLength)
 	}
-	if !p.Priority.IsZero() {
+	if hasPriority {
 		v := p.Priority.StreamDep
 		if !http2validStreamIDOrZero(v) && !f.AllowIllegalWrites {
 			return http2errDepStreamID
@@ -7220,11 +7295,13 @@ func (sc *http2serverConn) processHeaders(f *http2MetaHeadersFrame) error {
 	}
 	st := sc.newStream(id, 0, initialState, initialPriority)
 
+	var headerPriority *http2FingerprintHeaderPriority
 	if f.HasPriority() {
 		if err := sc.checkPriority(f.StreamID, f.Priority); err != nil {
 			return err
 		}
-		sc.fingerprint.capturePriority(f.StreamID, f.Priority)
+		priority := http2fingerprintHeaderPriority(f.Priority)
+		headerPriority = &priority
 		if !sc.writeSchedIgnoresRFC7540() {
 			sc.writeSched.AdjustStream(st.id, f.Priority)
 		}
@@ -7232,7 +7309,7 @@ func (sc *http2serverConn) processHeaders(f *http2MetaHeadersFrame) error {
 	if !sc.fingerprint.frozen {
 		sc.fingerprint.freeze()
 	}
-	if fingerprint := sc.fingerprint.fingerprint(f.Fields); fingerprint.Validate() == nil {
+	if fingerprint := sc.fingerprint.fingerprint(f.Fields, headerPriority); fingerprint.Validate() == nil {
 		st.fingerprint = &fingerprint
 	}
 	st.headerBlocks = new(http2headerBlockStore)
@@ -7246,7 +7323,9 @@ func (sc *http2serverConn) processHeaders(f *http2MetaHeadersFrame) error {
 	if st.reqTrailer != nil {
 		st.trailer = make(Header)
 	}
-	st.body = req.Body.(*http2requestBody).pipe // may be nil
+	if body, ok := req.Body.(*http2requestBody); ok {
+		st.body = body.pipe // may be nil
+	}
 	st.declBodyBytes = req.ContentLength
 
 	handler := sc.handler.ServeHTTP
@@ -7469,6 +7548,12 @@ func (sc *http2serverConn) newWriterAndRequest(st *http2stream, f *http2MetaHead
 		req.Body.(*http2requestBody).pipe = &http2pipe{
 			b: &http2dataBuffer{expected: req.ContentLength},
 		}
+	} else {
+		// A request whose initial HEADERS carries END_STREAM has no body.
+		// Representing it with requestBody makes Request.OutgoingLength report
+		// an unknown length, which causes proxies to replay an empty DATA frame
+		// instead of keeping END_STREAM on HEADERS.
+		req.Body = NoBody
 	}
 	return rw, req, nil
 }
@@ -9085,6 +9170,7 @@ type http2clientStream struct {
 	isHead                       bool
 	headerOrder                  http2HeaderOrder
 	headerBlocksToWrite          http2requestHeaderBlocksWriteConfig
+	headerPriority               *http2PriorityParam
 	headerBlocks                 *http2headerBlockStore
 	informationalResponseHandler http2InformationalResponseHandler
 	hasRequestTrailers           bool
@@ -9803,8 +9889,17 @@ func (cc *http2ClientConn) roundTrip(req *Request) (*Response, error) {
 
 func (cc *http2ClientConn) internalRoundTrip(req *Request, streamf func(*http2clientStream)) (*Response, error) {
 	ctx := req.Context()
-	if fingerprint, ok := http2fingerprintToWriteFromContext(ctx); ok && cc.fingerprintKey != http2connectionFingerprintKey(fingerprint) {
+	config, hasFingerprint := http2fingerprintWriteConfigFromContext(ctx)
+	if hasFingerprint && cc.fingerprintKey != config.connectionKey {
 		return nil, fmt.Errorf("http2: request fingerprint does not match ClientConn: %w", errors.ErrUnsupported)
+	}
+	var headerPriority *http2PriorityParam
+	if hasFingerprint && config.fingerprint.HeaderPriority != nil {
+		headerPriority = &http2PriorityParam{
+			StreamDep: config.fingerprint.HeaderPriority.StreamDep,
+			Exclusive: config.fingerprint.HeaderPriority.Exclusive,
+			Weight:    uint8(config.fingerprint.HeaderPriority.Weight - 1),
+		}
 	}
 	cs := &http2clientStream{
 		cc:                           cc,
@@ -9820,6 +9915,7 @@ func (cc *http2ClientConn) internalRoundTrip(req *Request, streamf func(*http2cl
 		donec:                        make(chan struct{}),
 		headerOrder:                  http2effectiveRequestHeaderOrder(ctx),
 		headerBlocksToWrite:          http2requestHeaderBlocksToWrite(ctx),
+		headerPriority:               headerPriority,
 		headerBlocks:                 new(http2headerBlockStore),
 		informationalResponseHandler: http2informationalResponseHandler(ctx),
 	}
@@ -10113,6 +10209,9 @@ func (cs *http2clientStream) encodeAndWriteHeaders(req *Request) error {
 		return http2errRequestCanceled
 	default:
 	}
+	if cs.headerPriority != nil && cs.headerPriority.StreamDep == cs.ID {
+		return fmt.Errorf("http2: HEADERS stream %d priority depends on itself", cs.ID)
+	}
 
 	// Encode headers.
 	//
@@ -10136,7 +10235,7 @@ func (cs *http2clientStream) encodeAndWriteHeaders(req *Request) error {
 			cs.hasRequestTrailers = res.HasTrailers
 			endStream := !res.HasBody && !res.HasTrailers
 			cs.sentHeaders = true
-			err = cc.writeHeaders(cs.ID, endStream, int(cc.maxFrameSize), hdrs)
+			err = cc.writeHeaders(cs.ID, endStream, int(cc.maxFrameSize), hdrs, cs.headerPriority)
 			http2traceWroteHeaders(cs.trace)
 			return err
 		}
@@ -10154,7 +10253,7 @@ func (cs *http2clientStream) encodeAndWriteHeaders(req *Request) error {
 	// Write the request.
 	endStream := !res.HasBody && !res.HasTrailers
 	cs.sentHeaders = true
-	err = cc.writeHeaders(cs.ID, endStream, int(cc.maxFrameSize), hdrs)
+	err = cc.writeHeaders(cs.ID, endStream, int(cc.maxFrameSize), hdrs, cs.headerPriority)
 	http2traceWroteHeaders(cs.trace)
 	return err
 }
@@ -10317,25 +10416,46 @@ func (cc *http2ClientConn) awaitOpenSlotForStreamLocked(cs *http2clientStream) e
 }
 
 // requires cc.wmu be held
-func (cc *http2ClientConn) writeHeaders(streamID uint32, endStream bool, maxFrameSize int, hdrs []byte) error {
+func (cc *http2ClientConn) writeHeaders(streamID uint32, endStream bool, maxFrameSize int, hdrs []byte, priority *http2PriorityParam) error {
+	if priority != nil && priority.StreamDep == streamID {
+		return fmt.Errorf("http2: HEADERS stream %d priority depends on itself", streamID)
+	}
 	first := true // first frame written (HEADERS is first, then CONTINUATION)
 	for len(hdrs) > 0 && cc.werr == nil {
+		frameMaxSize := maxFrameSize
+		if first && priority != nil {
+			// The five priority bytes are part of the HEADERS frame payload
+			// and count against the peer's maximum frame size.
+			frameMaxSize -= 5
+			if frameMaxSize <= 0 {
+				return fmt.Errorf("http2: invalid maximum frame size %d for prioritized HEADERS", maxFrameSize)
+			}
+		}
 		chunk := hdrs
-		if len(chunk) > maxFrameSize {
-			chunk = chunk[:maxFrameSize]
+		if len(chunk) > frameMaxSize {
+			chunk = chunk[:frameMaxSize]
 		}
 		hdrs = hdrs[len(chunk):]
 		endHeaders := len(hdrs) == 0
 		if first {
-			cc.fr.WriteHeaders(http2HeadersFrameParam{
+			params := http2HeadersFrameParam{
 				StreamID:      streamID,
 				BlockFragment: chunk,
 				EndStream:     endStream,
 				EndHeaders:    endHeaders,
-			})
+			}
+			if priority != nil {
+				params.Priority = *priority
+				params.PriorityPresent = true
+			}
+			if err := cc.fr.WriteHeaders(params); err != nil {
+				return err
+			}
 			first = false
 		} else {
-			cc.fr.WriteContinuation(streamID, endHeaders, chunk)
+			if err := cc.fr.WriteContinuation(streamID, endHeaders, chunk); err != nil {
+				return err
+			}
 		}
 	}
 	cc.bw.Flush()
@@ -10543,7 +10663,7 @@ func (cs *http2clientStream) writeRequestBody(req *Request) (err error) {
 	// Two ways to send END_STREAM: either with trailers, or
 	// with an empty DATA frame.
 	if len(trls) > 0 {
-		err = cc.writeHeaders(cs.ID, true, maxFrameSize, trls)
+		err = cc.writeHeaders(cs.ID, true, maxFrameSize, trls, nil)
 	} else {
 		err = cc.fr.WriteData(cs.ID, true, nil)
 	}

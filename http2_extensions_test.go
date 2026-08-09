@@ -94,26 +94,41 @@ func TestHTTP2FingerprintExtensions(t *testing.T) {
 		Settings: []http.Setting{
 			{ID: http.SettingHeaderTableSize, Val: 4096},
 		},
+		Priorities:        []http.FingerprintPriority{{StreamID: 3, StreamDep: 0, Weight: 201}},
+		HeaderPriority:    &http.FingerprintHeaderPriority{StreamDep: 0, Exclusive: true, Weight: 101},
 		PseudoHeaderOrder: []string{":method", ":authority", ":scheme", ":path"},
 	}
-	const encoded = "1:4096|00|0|m,a,s,p"
+	const encoded = "1:4096|00|3:0:0:201|m,a,s,p"
 	if got := fingerprint.String(); got != encoded {
 		t.Fatalf("Fingerprint.String() = %q; want %q", got, encoded)
+	}
+	headerPriorityOnly := fingerprint
+	headerPriorityOnly.Priorities = nil
+	if got, want := headerPriorityOnly.String(), "1:4096|00|0|m,a,s,p"; got != want {
+		t.Fatalf("HEADERS-priority-only Fingerprint.String() = %q; want %q", got, want)
 	}
 
 	parsed, err := http.ParseFingerprint(encoded)
 	if err != nil {
 		t.Fatalf("ParseFingerprint: %v", err)
 	}
-	if !reflect.DeepEqual(parsed, fingerprint) {
-		t.Fatalf("ParseFingerprint() = %#v; want %#v", parsed, fingerprint)
+	wantParsed := fingerprint
+	wantParsed.HeaderPriority = nil
+	if !reflect.DeepEqual(parsed, wantParsed) {
+		t.Fatalf("ParseFingerprint() = %#v; want serialized fields %#v", parsed, wantParsed)
+	}
+	if parsed.Hash() != fingerprint.Hash() {
+		t.Fatalf("parsed Hash() = %q; want %q", parsed.Hash(), fingerprint.Hash())
+	}
+	if _, err := http.ParseFingerprint("1:4096|00|h:1:1:0:101|m,a,s,p"); err == nil {
+		t.Fatal("ParseFingerprint unexpectedly accepted unpublished HEADERS priority extension")
 	}
 
 	req, err := http.NewRequest("GET", "https://example.com/", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	req, err = http.WithRequestFingerprint(req, parsed)
+	req, err = http.WithRequestFingerprint(req, fingerprint)
 	if err != nil {
 		t.Fatalf("WithRequestFingerprint: %v", err)
 	}
@@ -126,8 +141,10 @@ func TestHTTP2FingerprintExtensions(t *testing.T) {
 	}
 
 	stored.Settings[0].Val++
+	stored.Priorities[0].Weight++
+	stored.HeaderPriority.Weight++
 	storedAgain, _ := http.RequestFingerprint(req)
-	if storedAgain.Settings[0].Val != fingerprint.Settings[0].Val {
+	if !reflect.DeepEqual(storedAgain, fingerprint) {
 		t.Fatal("RequestFingerprint returned mutable shared state")
 	}
 }
