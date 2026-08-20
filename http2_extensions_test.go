@@ -7,13 +7,20 @@
 package http_test
 
 import (
+	"context"
+	"errors"
 	"io"
+	"net"
+	"net/textproto"
 	"reflect"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/josexy/xhttp"
 	"github.com/josexy/xhttp/httptest"
+	"github.com/josexy/xhttp/httptrace"
 )
 
 func TestHTTP1ExactRequestRejectedOnNegotiatedHTTP2(t *testing.T) {
@@ -65,7 +72,7 @@ func TestHTTP2TrailerBlockWithZeroMetadataStillDispatches(t *testing.T) {
 		}
 		errCh <- http.SetResponseTrailerBlock(w, http.HeaderBlock{
 			Kind:   http.HeaderBlockTrailer,
-			Fields: []http.HeaderField{{Name: "x-trailer", Value: "done"}},
+			Fields: []http.HeaderField{{Name: "x-trailer", Value: "done", Sensitive: true}},
 		})
 	}))
 	server.EnableHTTP2 = true
@@ -84,8 +91,48 @@ func TestHTTP2TrailerBlockWithZeroMetadataStillDispatches(t *testing.T) {
 		t.Fatal(err)
 	}
 	blocks := http.ResponseHeaderBlocks(resp)
-	if len(blocks) != 2 || blocks[1].Kind != http.HeaderBlockTrailer || blocks[1].ProtoMajor != 0 {
+	if len(blocks) != 2 || blocks[1].Kind != http.HeaderBlockTrailer || blocks[1].ProtoMajor != 0 ||
+		len(blocks[1].Fields) != 1 || !blocks[1].Fields[0].Sensitive {
 		t.Fatalf("blocks = %#v", blocks)
+	}
+}
+
+func TestHTTP2CapturedInformationalResponsesRespectBudget(t *testing.T) {
+	headerValue := strings.Repeat("a", 128)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Hint", headerValue)
+		for range 512 {
+			w.WriteHeader(http.StatusEarlyHints)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+
+	client := server.Client()
+	transport := client.Transport.(*http.Transport).Clone()
+	transport.MaxResponseHeaderBytes = 512
+	client.Transport = transport
+	trace := &httptrace.ClientTrace{Got1xxResponse: func(int, textproto.MIMEHeader) error {
+		return nil
+	}}
+	req, err := http.NewRequestWithContext(
+		httptrace.WithClientTrace(context.Background(), trace),
+		"GET",
+		server.URL,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(req)
+	if err == nil {
+		resp.Body.Close()
+		t.Fatal("request succeeded after captured 1xx blocks exceeded the response header budget")
+	}
+	if !strings.Contains(err.Error(), "captured response header blocks exceeded") {
+		t.Fatalf("Do error = %v; want captured response header blocks exceeded", err)
 	}
 }
 
@@ -146,6 +193,160 @@ func TestHTTP2FingerprintExtensions(t *testing.T) {
 	storedAgain, _ := http.RequestFingerprint(req)
 	if !reflect.DeepEqual(storedAgain, fingerprint) {
 		t.Fatal("RequestFingerprint returned mutable shared state")
+	}
+}
+
+func TestHTTP2FingerprintTransportReplayAndPooling(t *testing.T) {
+	observed := make(chan http.Fingerprint, 4)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fingerprint, ok := http.RequestFingerprint(r)
+		if !ok {
+			http.Error(w, "missing HTTP/2 fingerprint", http.StatusInternalServerError)
+			return
+		}
+		observed <- fingerprint
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+
+	transport := server.Client().Transport.(*http.Transport).Clone()
+	transport.DisableCompression = true
+	var dials atomic.Int32
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		dials.Add(1)
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport}
+
+	base := http.Fingerprint{
+		Settings: []http.Setting{
+			{ID: http.SettingHeaderTableSize, Val: 65536},
+			{ID: http.SettingMaxConcurrentStreams, Val: 1000},
+			{ID: http.SettingInitialWindowSize, Val: 6291456},
+			{ID: http.SettingMaxHeaderListSize, Val: 262144},
+		},
+		WindowUpdate: 15663105,
+		Priorities: []http.FingerprintPriority{
+			{StreamID: 3, StreamDep: 0, Weight: 201},
+			{StreamID: 5, StreamDep: 3, Exclusive: true, Weight: 101},
+		},
+		HeaderPriority:    &http.FingerprintHeaderPriority{StreamDep: 0, Weight: 1},
+		PseudoHeaderOrder: []string{":method", ":authority", ":scheme", ":path"},
+	}
+	differentPseudoOrder := base
+	differentPseudoOrder.PseudoHeaderOrder = []string{":scheme", ":method", ":authority", ":path"}
+	differentHeaderPriority := base
+	differentHeaderPriority.HeaderPriority = &http.FingerprintHeaderPriority{StreamDep: 0, Exclusive: true, Weight: 33}
+	differentConnection := base
+	differentConnection.Settings = append([]http.Setting(nil), base.Settings...)
+	differentConnection.Settings[0].Val = 32768
+
+	wants := []http.Fingerprint{base, differentPseudoOrder, differentHeaderPriority, differentConnection}
+	for i, fingerprint := range wants {
+		req, err := http.NewRequest(http.MethodGet, server.URL+"/request-"+strconv.Itoa(i), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req, err = http.WithRequestFingerprint(req, fingerprint)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+
+	for i, want := range wants {
+		if got := <-observed; !reflect.DeepEqual(got, want) {
+			t.Fatalf("request %d fingerprint = %#v; want %#v", i, got, want)
+		}
+	}
+	if got, want := dials.Load(), int32(2); got != want {
+		t.Fatalf("dial count = %d; want %d", got, want)
+	}
+}
+
+func TestHTTP2NewClientConnFingerprint(t *testing.T) {
+	type observation struct {
+		fingerprint http.Fingerprint
+		ok          bool
+	}
+	observed := make(chan observation, 1)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fingerprint, ok := http.RequestFingerprint(r)
+		observed <- observation{fingerprint: fingerprint, ok: ok}
+		if !ok {
+			http.Error(w, "missing HTTP/2 fingerprint", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+
+	transport := server.Client().Transport.(*http.Transport).Clone()
+	transport.DisableCompression = true
+	defer transport.CloseIdleConnections()
+
+	fingerprint := http.Fingerprint{
+		Settings: []http.Setting{
+			{ID: http.SettingHeaderTableSize, Val: 65536},
+			{ID: http.SettingMaxConcurrentStreams, Val: 1000},
+			{ID: http.SettingInitialWindowSize, Val: 6291456},
+			{ID: http.SettingMaxHeaderListSize, Val: 262144},
+		},
+		WindowUpdate:      15663105,
+		Priorities:        []http.FingerprintPriority{{StreamID: 3, StreamDep: 0, Weight: 201}},
+		HeaderPriority:    &http.FingerprintHeaderPriority{StreamDep: 0, Exclusive: true, Weight: 101},
+		PseudoHeaderOrder: []string{":method", ":authority", ":scheme", ":path"},
+	}
+	req, err := http.NewRequest(http.MethodGet, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err = http.WithRequestFingerprint(req, fingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conn, err := transport.NewClientConn(req.Context(), "https", server.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	resp, err := conn.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	got := <-observed
+	if !got.ok {
+		t.Fatal("server did not observe an HTTP/2 fingerprint")
+	}
+	if !reflect.DeepEqual(got.fingerprint, fingerprint) {
+		t.Fatalf("server fingerprint = %#v; want %#v", got.fingerprint, fingerprint)
+	}
+
+	different := fingerprint
+	different.Settings = append([]http.Setting(nil), fingerprint.Settings...)
+	different.Settings[0].Val = 32768
+	req, err = http.NewRequest(http.MethodGet, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err = http.WithRequestFingerprint(req, different)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.RoundTrip(req); !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("RoundTrip with different connection fingerprint error = %v; want errors.ErrUnsupported", err)
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"github.com/josexy/xhttp/internal/ascii"
 	"io"
 	"maps"
+	"math"
 	"mime"
 	"mime/multipart"
 	"net/textproto"
@@ -28,8 +29,8 @@ import (
 	"sync"
 	_ "unsafe" // for linkname
 
-	"github.com/josexy/net/http/httpguts"
-	"github.com/josexy/net/idna"
+	"golang.org/x/net/http/httpguts"
+	"golang.org/x/net/idna"
 )
 
 const (
@@ -65,7 +66,7 @@ var (
 	ErrNotSupported = &ProtocolError{"feature not supported"}
 
 	// Deprecated: ErrUnexpectedTrailer is no longer returned by
-	// anything in the net/http package. Callers should not
+	// anything in the github.com/josexy/xhttp package. Callers should not
 	// compare errors against this variable.
 	ErrUnexpectedTrailer = &ProtocolError{"trailer header without chunked transfer encoding"}
 
@@ -78,17 +79,17 @@ var (
 	ErrNotMultipart = &ProtocolError{"request Content-Type isn't multipart/form-data"}
 
 	// Deprecated: ErrHeaderTooLong is no longer returned by
-	// anything in the net/http package. Callers should not
+	// anything in the github.com/josexy/xhttp package. Callers should not
 	// compare errors against this variable.
 	ErrHeaderTooLong = &ProtocolError{"header too long"}
 
 	// Deprecated: ErrShortBody is no longer returned by
-	// anything in the net/http package. Callers should not
+	// anything in the github.com/josexy/xhttp package. Callers should not
 	// compare errors against this variable.
 	ErrShortBody = &ProtocolError{"entity body too short"}
 
 	// Deprecated: ErrMissingContentLength is no longer returned by
-	// anything in the net/http package. Callers should not
+	// anything in the github.com/josexy/xhttp package. Callers should not
 	// compare errors against this variable.
 	ErrMissingContentLength = &ProtocolError{"missing ContentLength in HEAD response"}
 )
@@ -230,7 +231,7 @@ type Request struct {
 	// ":authority" pseudo-header field.
 	// It may be of the form "host:port". For international domain
 	// names, Host may be in Punycode or Unicode form. Use
-	// github.com/josexy/net/idna to convert it to either format if
+	// golang.org/x/net/idna to convert it to either format if
 	// needed.
 	// To prevent DNS rebinding attacks, server Handlers should
 	// validate that the Host header has a value for which the
@@ -278,6 +279,10 @@ type Request struct {
 	// After the HTTP request is sent the map values can be updated while
 	// the request body is read. Once the body returns EOF, the caller must
 	// not mutate Trailer.
+	//
+	// Writing a request whose Trailer contains a key with invalid bytes
+	// (such as CR or LF), or such a value present when Write begins,
+	// returns an error.
 	//
 	// Few HTTP clients, servers, or proxies support HTTP trailers.
 	Trailer Header
@@ -372,6 +377,7 @@ func (r *Request) WithContext(ctx context.Context) *Request {
 	r2 := new(Request)
 	*r2 = *r
 	r2.ctx = ctx
+	inheritRequestHeaderBlockStore(r2, r)
 	return r2
 }
 
@@ -390,6 +396,7 @@ func (r *Request) Clone(ctx context.Context) *Request {
 	r2 := new(Request)
 	*r2 = *r
 	r2.ctx = ctx
+	inheritRequestHeaderBlockStore(r2, r)
 	r2.URL = cloneURL(r.URL)
 	r2.Header = r.Header.Clone()
 	r2.Trailer = r.Trailer.Clone()
@@ -558,6 +565,11 @@ const defaultUserAgent = "Go-http-client/1.1"
 // If Body is present, Content-Length is <= 0 and [Request.TransferEncoding]
 // hasn't been set to "identity", Write adds "Transfer-Encoding:
 // chunked" to the header. Body is closed after it is sent.
+//
+// Header values for Host, Content-Length, Transfer-Encoding,
+// and Trailer are not used; these are derived from other Request fields.
+// If the Header does not contain a User-Agent value, Write uses
+// "Go-http-client/1.1".
 func (r *Request) Write(w io.Writer) error {
 	return r.write(w, false, nil, nil)
 }
@@ -616,7 +628,7 @@ func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitF
 	// Validate that the Host header is a valid header in general,
 	// but don't validate the host itself. This is sufficient to avoid
 	// header or request smuggling via the Host field.
-	// The server can (and will, if it's a net/http server) reject
+	// The server can (and will, if it's a github.com/josexy/xhttp server) reject
 	// the request if it doesn't consider the host valid.
 	if !httpguts.ValidHostHeader(host) {
 		// Historically, we would truncate the Host header after '/' or ' '.
@@ -654,7 +666,7 @@ func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitF
 		}
 	}
 	if stringContainsCTLByte(ruri) {
-		return errors.New("net/http: can't write control character in Request.URL")
+		return errors.New("github.com/josexy/xhttp: can't write control character in Request.URL")
 	}
 	// TODO: validate r.Method too? At least it's less likely to
 	// come from an attacker (more likely to be a constant in
@@ -801,7 +813,7 @@ func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitF
 
 // requestBodyReadError wraps an error from (*Request).write to indicate
 // that the error came from a Read call on the Request.Body.
-// This error type should not escape the net/http package to users.
+// This error type should not escape the github.com/josexy/xhttp package to users.
 type requestBodyReadError struct{ error }
 
 func idnaASCII(v string) (string, error) {
@@ -899,7 +911,7 @@ func NewRequest(method, url string, body io.Reader) (*Request, error) {
 //
 // NewRequestWithContext returns a Request suitable for use with
 // [Client.Do] or [Transport.RoundTrip]. To create a request for use with
-// testing a Server Handler, either use the [net/http/httptest.NewRequest] function,
+// testing a Server Handler, either use the [github.com/josexy/xhttp/httptest.NewRequest] function,
 // use [ReadRequest], or manually update the Request fields.
 // For an outgoing client request, the context
 // controls the entire lifetime of a request and its response:
@@ -920,10 +932,10 @@ func NewRequestWithContext(ctx context.Context, method, url string, body io.Read
 		method = "GET"
 	}
 	if !validMethod(method) {
-		return nil, fmt.Errorf("net/http: invalid method %q", method)
+		return nil, fmt.Errorf("github.com/josexy/xhttp: invalid method %q", method)
 	}
 	if ctx == nil {
-		return nil, errors.New("net/http: nil Context")
+		return nil, errors.New("github.com/josexy/xhttp: nil Context")
 	}
 	u, err := urlpkg.Parse(url)
 	if err != nil {
@@ -934,7 +946,7 @@ func NewRequestWithContext(ctx context.Context, method, url string, body io.Read
 		rc = io.NopCloser(body)
 	}
 	// The host's colon:port should be normalized. See Issue 14836.
-	u.Host = removeEmptyPort(u.Host)
+	u.Host = strings.TrimSuffix(u.Host, ":")
 	req := &Request{
 		ctx:        ctx,
 		Method:     method,
@@ -1091,6 +1103,11 @@ func ReadRequest(b *bufio.Reader) (*Request, error) {
 	return req, nil
 }
 
+// readMIMEHeader is defined in package [net/textproto].
+//
+//go:linkname readMIMEHeader net/textproto.readMIMEHeader
+func readMIMEHeader(r *textproto.Reader, maxMemory, maxHeaders int64) (textproto.MIMEHeader, error)
+
 // readRequest should be an internal detail,
 // but widely used packages access it using linkname.
 // Notable members of the hall of shame include:
@@ -1103,6 +1120,10 @@ func ReadRequest(b *bufio.Reader) (*Request, error) {
 //
 //go:linkname readRequest
 func readRequest(b *bufio.Reader) (req *Request, err error) {
+	return readRequestLimit(b, math.MaxInt64)
+}
+
+func readRequestLimit(b *bufio.Reader, maxHeaders int64) (req *Request, err error) {
 	tp := newTextprotoReader(b)
 	defer putTextprotoReader(tp)
 
@@ -1156,8 +1177,12 @@ func readRequest(b *bufio.Reader) (req *Request, err error) {
 	}
 
 	// Subsequent lines: Key: value.
-	mimeHeader, initialBlock, err := readMIMEHeaderBlock(tp, HeaderBlockInitial, 0)
+	mimeHeader, initialBlock, err := readMIMEHeaderBlock(tp, HeaderBlockInitial, 0, maxHeaders)
 	if err != nil {
+		// TODO: Add a distinguishable error to net/textproto.
+		if err.Error() == "message too large" {
+			return nil, errTooLarge
+		}
 		return nil, err
 	}
 	req.Header = Header(mimeHeader)
@@ -1184,7 +1209,7 @@ func readRequest(b *bufio.Reader) (req *Request, err error) {
 
 	req.Close = shouldClose(req.ProtoMajor, req.ProtoMinor, req.Header, false)
 
-	err = readTransfer(req, b)
+	err = readTransfer(req, b, maxHeaders)
 	if err != nil {
 		return nil, err
 	}
@@ -1495,6 +1520,9 @@ func (r *Request) FormFile(key string) (multipart.File, *multipart.FileHeader, e
 // that matched the request.
 // It returns the empty string if the request was not matched against a pattern
 // or there is no such wildcard in the pattern.
+//
+// The value is unescaped. For example, if the pattern "/b/{bucket}" matches
+// the path "/b/a%2fb", PathValue("bucket") returns "a/b".
 func (r *Request) PathValue(name string) string {
 	if i := r.patIndex(name); i >= 0 {
 		return r.matches[i]
@@ -1504,6 +1532,7 @@ func (r *Request) PathValue(name string) string {
 
 // SetPathValue sets name to value, so that subsequent calls to r.PathValue(name)
 // return value.
+// It does not unescape value.
 func (r *Request) SetPathValue(name, value string) {
 	if i := r.patIndex(name); i >= 0 {
 		r.matches[i] = value

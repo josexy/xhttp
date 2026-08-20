@@ -4,8 +4,8 @@
 
 // The wire protocol for HTTP's "chunked" Transfer-Encoding.
 
-// Package internal contains HTTP internals shared by net/http and
-// net/http/httputil.
+// Package internal contains HTTP internals shared by github.com/josexy/xhttp and
+// github.com/josexy/xhttp/httputil.
 package internal
 
 import (
@@ -268,7 +268,7 @@ func (cw *chunkedWriter) Close() error {
 
 // FlushAfterChunkWriter signals from the caller of [NewChunkedWriter]
 // that each chunk should be followed by a flush. It is used by the
-// [net/http.Transport] code to keep the buffering behavior for headers and
+// [github.com/josexy/xhttp.Transport] code to keep the buffering behavior for headers and
 // trailers, but flush out chunks aggressively in the middle for
 // request bodies which may be generated slowly. See Issue 6574.
 type FlushAfterChunkWriter struct {

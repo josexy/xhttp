@@ -2,10 +2,6 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// github.com/josexy/net/http2 selects its legacy implementation by Go version;
-// regenerate this bundle with Go 1.26 to retain the extension APIs below.
-//go:generate go run golang.org/x/tools/cmd/bundle@v0.44.0 -dst=net/http -pkg=http -o=h2_bundle.go -prefix=http2 -tags=!nethttpomithttp2 -import=net/http/httptrace=github.com/josexy/xhttp/httptrace -import=github.com/josexy/net/internal/httpcommon=github.com/josexy/xhttp/internal/httpcommon -import=github.com/josexy/net/internal/httpsfv=github.com/josexy/xhttp/internal/httpsfv github.com/josexy/net/http2
-
 package http
 
 import (
@@ -14,8 +10,9 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+	_ "unsafe"
 
-	"github.com/josexy/net/http/httpguts"
+	"golang.org/x/net/http/httpguts"
 )
 
 // Protocols is a set of HTTP protocols.
@@ -26,7 +23,7 @@ import (
 //   - HTTP1 is the HTTP/1.0 and HTTP/1.1 protocols.
 //     HTTP1 is supported on both unsecured TCP and secured TLS connections.
 //
-//   - HTTP2 is the HTTP/2 protcol over a TLS connection.
+//   - HTTP2 is the HTTP/2 protocol over a TLS connection.
 //
 //   - UnencryptedHTTP2 is the HTTP/2 protocol over an unsecured TCP connection.
 type Protocols struct {
@@ -37,6 +34,7 @@ const (
 	protoHTTP1 = 1 << iota
 	protoHTTP2
 	protoUnencryptedHTTP2
+	protoHTTP3
 )
 
 // HTTP1 reports whether p includes HTTP/1.
@@ -57,12 +55,26 @@ func (p Protocols) UnencryptedHTTP2() bool { return p.bits&protoUnencryptedHTTP2
 // SetUnencryptedHTTP2 adds or removes unencrypted HTTP/2 from p.
 func (p *Protocols) SetUnencryptedHTTP2(ok bool) { p.setBit(protoUnencryptedHTTP2, ok) }
 
+// http3 reports whether p includes HTTP/3.
+func (p Protocols) http3() bool { return p.bits&protoHTTP3 != 0 }
+
+// setHTTP3 adds or removes HTTP/3 from p.
+func (p *Protocols) setHTTP3(ok bool) { p.setBit(protoHTTP3, ok) }
+
+//go:linkname protocolSetHTTP3 github.com/josexy/net/internal/http3_test.protocolSetHTTP3
+func protocolSetHTTP3(p *Protocols) { p.setHTTP3(true) }
+
 func (p *Protocols) setBit(bit uint8, ok bool) {
 	if ok {
 		p.bits |= bit
 	} else {
 		p.bits &^= bit
 	}
+}
+
+// empty returns true if p has no protocol set at all.
+func (p Protocols) empty() bool {
+	return p.bits == 0
 }
 
 func (p Protocols) String() string {
@@ -75,6 +87,9 @@ func (p Protocols) String() string {
 	}
 	if p.UnencryptedHTTP2() {
 		s = append(s, "UnencryptedHTTP2")
+	}
+	if p.http3() {
+		s = append(s, "HTTP3")
 	}
 	return "{" + strings.Join(s, ",") + "}"
 }
@@ -106,17 +121,17 @@ type contextKey struct {
 	name string
 }
 
-func (k *contextKey) String() string { return "net/http context value " + k.name }
+func (k *contextKey) String() string { return "github.com/josexy/xhttp context value " + k.name }
 
-// Given a string of the form "host", "host:port", or "[ipv6::address]:port",
-// return true if the string includes a port.
-func hasPort(s string) bool { return strings.LastIndex(s, ":") > strings.LastIndex(s, "]") }
-
-// removeEmptyPort strips the empty port in ":port" to ""
-// as mandated by RFC 3986 Section 6.2.3.
-func removeEmptyPort(host string) string {
-	if hasPort(host) {
-		return strings.TrimSuffix(host, ":")
+// removePort strips the port while correctly handling IPv6.
+func removePort(host string) string {
+	for i := len(host) - 1; i >= 0; i-- {
+		switch host[i] {
+		case ':':
+			return host[:i]
+		case ']':
+			return host
+		}
 	}
 	return host
 }

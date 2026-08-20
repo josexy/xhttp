@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -30,6 +31,32 @@ func MustHaveExec(t testing.TB) {
 	case "ios", "js", "wasip1":
 		t.Skipf("subprocess execution is unavailable on %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
+}
+
+// Executable returns the path to the current test binary.
+func Executable(t testing.TB) string {
+	t.Helper()
+	MustHaveExec(t)
+	path, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// CleanCmdEnv removes variables that can add unrelated diagnostic output to a
+// subprocess launched by a test.
+func CleanCmdEnv(cmd *exec.Cmd) *exec.Cmd {
+	if cmd.Env != nil {
+		panic("environment already set")
+	}
+	for _, env := range cmd.Environ() {
+		if strings.HasPrefix(env, "GODEBUG=") || strings.HasPrefix(env, "GOTRACEBACK=") {
+			continue
+		}
+		cmd.Env = append(cmd.Env, env)
+	}
+	return cmd
 }
 
 // CommandContext returns an exec.Cmd after checking subprocess support.

@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -47,27 +48,45 @@ func TestForeachHeaderElement(t *testing.T) {
 	}
 }
 
-// Test that cmd/go doesn't link in the HTTP server.
+// Test that a program using the fork's HTTP client doesn't link in the HTTP server.
 //
 // This catches accidental dependencies between the HTTP transport and
 // server code.
 func TestCmdGoNoHTTPServer(t *testing.T) {
 	t.Parallel()
 	goBin := testenv.GoToolPath(t)
-	out, err := testenv.Command(t, goBin, "tool", "nm", goBin).CombinedOutput()
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "client.go")
+	bin := filepath.Join(tmp, "client")
+	program := `package main
+import http "github.com/josexy/xhttp"
+func main() {
+	c := new(http.Client)
+	_, _ = c.Do(nil)
+	t := new(http.Transport)
+	_, _ = t.RoundTrip(nil)
+}
+`
+	if err := os.WriteFile(src, []byte(program), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := testenv.Command(t, goBin, "build", "-o", bin, src).CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v: %s", err, out)
+	}
+	out, err := testenv.Command(t, goBin, "tool", "nm", bin).CombinedOutput()
 	if err != nil {
 		t.Fatalf("go tool nm: %v: %s", err, out)
 	}
 	wantSym := map[string]bool{
 		// Verify these exist: (sanity checking this test)
-		"net/http.(*Client).do":           true,
-		"net/http.(*Transport).RoundTrip": true,
+		"github.com/josexy/xhttp.(*Client).do":           true,
+		"github.com/josexy/xhttp.(*Transport).RoundTrip": true,
 
 		// Verify these don't exist:
-		"net/http.http2Server":           false,
-		"net/http.(*Server).Serve":       false,
-		"net/http.(*ServeMux).ServeHTTP": false,
-		"net/http.DefaultServeMux":       false,
+		"github.com/josexy/xhttp.http2Server":           false,
+		"github.com/josexy/xhttp.(*Server).Serve":       false,
+		"github.com/josexy/xhttp.(*ServeMux).ServeHTTP": false,
+		"github.com/josexy/xhttp.DefaultServeMux":       false,
 	}
 	for sym, want := range wantSym {
 		got := bytes.Contains(out, []byte(sym))
@@ -77,32 +96,6 @@ func TestCmdGoNoHTTPServer(t *testing.T) {
 		if want && !got {
 			t.Errorf("expected to find symbol %q in cmd/go; not found", sym)
 		}
-	}
-}
-
-// Tests that the nethttpomithttp2 build tag doesn't rot too much,
-// even if there's not a regular builder on it.
-func TestOmitHTTP2(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping in short mode")
-	}
-	t.Parallel()
-	goTool := testenv.GoToolPath(t)
-	out, err := testenv.Command(t, goTool, "test", "-short", "-tags=nethttpomithttp2", "github.com/josexy/xhttp").CombinedOutput()
-	if err != nil {
-		t.Fatalf("go test -short failed: %v, %s", err, out)
-	}
-}
-
-// Tests that the nethttpomithttp2 build tag at least type checks
-// in short mode.
-// The TestOmitHTTP2 test above actually runs tests (in long mode).
-func TestOmitHTTP2Vet(t *testing.T) {
-	t.Parallel()
-	goTool := testenv.GoToolPath(t)
-	out, err := testenv.Command(t, goTool, "vet", "-tags=nethttpomithttp2", "github.com/josexy/xhttp").CombinedOutput()
-	if err != nil {
-		t.Fatalf("go vet failed: %v, %s", err, out)
 	}
 }
 
@@ -147,7 +140,7 @@ var forbiddenStringsFunctions = map[string]bool{
 	"TrimSpace": true,
 }
 
-// TestNoUnicodeStrings checks that nothing in net/http uses the Unicode-aware
+// TestNoUnicodeStrings checks that nothing in github.com/josexy/xhttp uses the Unicode-aware
 // strings and bytes package functions. HTTP is mostly ASCII based, and doing
 // Unicode-aware case folding or space stripping can introduce vulnerabilities.
 func TestNoUnicodeStrings(t *testing.T) {
@@ -159,17 +152,12 @@ func TestNoUnicodeStrings(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if path == "internal/ascii" {
-			return fs.SkipDir
-		}
-		// These directories are relocation support or vendored dependencies,
-		// not source from the upstream net/http tree covered by this test.
-		if path == "internal/profile" || path == "vendor" {
+		if path == "internal/ascii" || path == "internal/profile" {
 			return fs.SkipDir
 		}
 		if !strings.HasSuffix(path, ".go") ||
 			strings.HasSuffix(path, "_test.go") ||
-			path == "h2_bundle.go" ||
+			path == "internal/http2/ascii.go" ||
 			path == "internal/httpcommon/httpcommon.go" ||
 			d.IsDir() {
 			return nil
@@ -223,5 +211,24 @@ func BenchmarkHexEscapeNonASCII(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		hexEscapeNonASCII(redirectURL)
+	}
+}
+
+func TestRemovePort(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		{"example.com:8080", "example.com"},
+		{"example.com", "example.com"},
+		{"[2001:db8::1]:443", "[2001:db8::1]"},
+		{"[2001:db8::1]", "[2001:db8::1]"},
+		{"192.0.2.1:8080", "192.0.2.1"},
+		{"192.0.2.1", "192.0.2.1"},
+	}
+	for _, tc := range tests {
+		got := removePort(tc.in)
+		if got != tc.want {
+			t.Errorf("removePort(%q) = %q; want %q", tc.in, got, tc.want)
+		}
 	}
 }

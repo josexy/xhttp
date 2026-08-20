@@ -371,7 +371,7 @@ func ProcessEnv(r *http.Request) map[string]string {
 // addFastCGIEnvToContext reports whether to include the FastCGI environment variable s
 // in the http.Request.Context, accessible via ProcessEnv.
 func addFastCGIEnvToContext(s string) bool {
-	// Exclude things supported by net/http natively:
+	// Exclude things supported by github.com/josexy/xhttp natively:
 	switch s {
 	case "CONTENT_LENGTH", "CONTENT_TYPE", "HTTPS",
 		"PATH_INFO", "QUERY_STRING", "REMOTE_ADDR",

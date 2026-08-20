@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"github.com/josexy/xhttp/internal/http2"
 	"github.com/josexy/xhttp/internal/testcert"
 	"io"
 	"net"
@@ -136,7 +137,7 @@ func TestTransportShouldRetryRequest(t *testing.T) {
 		2: {
 			pc:   &persistConn{reused: true},
 			req:  dummyRequest("POST"),
-			err:  http2ErrNoCachedConn,
+			err:  http2.ErrNoCachedConn,
 			want: true,
 		},
 		3: {
@@ -243,7 +244,7 @@ func TestTransportBodyAltRewind(t *testing.T) {
 						}, nil
 					}
 					roundTripped = true
-					return nil, http2noCachedConnError{}
+					return nil, http2.ErrNoCachedConn
 				})
 			},
 		},

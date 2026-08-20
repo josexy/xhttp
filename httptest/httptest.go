@@ -42,7 +42,7 @@ func NewRequest(method, target string, body io.Reader) *http.Request {
 // panic is acceptable.
 //
 // To generate a client HTTP request instead of a server request, see
-// the NewRequest function in the net/http package.
+// the NewRequest function in the github.com/josexy/xhttp package.
 func NewRequestWithContext(ctx context.Context, method, target string, body io.Reader) *http.Request {
 	if method == "" {
 		method = "GET"

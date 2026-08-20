@@ -77,7 +77,7 @@ func goroutineLeaked() bool {
 		// Wait for goroutines to schedule and die off:
 		time.Sleep(100 * time.Millisecond)
 	}
-	fmt.Fprintf(os.Stderr, "Too many goroutines running after net/http test(s).\n")
+	fmt.Fprintf(os.Stderr, "Too many goroutines running after github.com/josexy/xhttp test(s).\n")
 	for stack, count := range stackCount {
 		fmt.Fprintf(os.Stderr, "%d instances of:\n%s\n", count, stack)
 	}
@@ -136,7 +136,7 @@ func afterTest(t testing.TB) {
 	badSubstring := map[string]string{
 		").readLoop(":  "a Transport",
 		").writeLoop(": "a Transport",
-		"created by net/http/httptest.(*Server).Start": "an httptest.Server",
+		"created by github.com/josexy/xhttp/httptest.(*Server).Start": "an httptest.Server",
 		"timeoutHandler":        "a TimeoutHandler",
 		"net.(*netFD).connect(": "a timing out dial",
 		").noteClientGone(":     "a closenotifier sender",

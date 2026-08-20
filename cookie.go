@@ -89,15 +89,14 @@ func cookieNumWithinMax(cookieNum int) bool {
 // which were set in it. Since the same cookie name can appear multiple times
 // the returned Values can contain more than one value for a given key.
 func ParseCookie(line string) ([]*Cookie, error) {
-	if !cookieNumWithinMax(strings.Count(line, ";") + 1) {
+	nparts := strings.Count(line, ";") + 1
+	if !cookieNumWithinMax(nparts) {
 		return nil, errCookieNumLimitExceeded
-	}
-	parts := strings.Split(textproto.TrimString(line), ";")
-	if len(parts) == 1 && parts[0] == "" {
+	} else if nparts == 1 && textproto.TrimString(line) == "" {
 		return nil, errBlankCookie
 	}
-	cookies := make([]*Cookie, 0, len(parts))
-	for _, s := range parts {
+	cookies := make([]*Cookie, 0, nparts)
+	for s := range strings.SplitSeq(line, ";") {
 		s = textproto.TrimString(s)
 		name, value, found := strings.Cut(s, "=")
 		if !found {
@@ -288,7 +287,7 @@ func (c *Cookie) String() string {
 			b.WriteString("; Domain=")
 			b.WriteString(d)
 		} else {
-			log.Printf("net/http: invalid Cookie.Domain %q; dropping domain attribute", c.Domain)
+			log.Printf("github.com/josexy/xhttp: invalid Cookie.Domain %q; dropping domain attribute", c.Domain)
 		}
 	}
 	var buf [len(TimeFormat)]byte
@@ -535,7 +534,7 @@ func sanitizeOrWarn(fieldName string, valid func(byte) bool, v string) string {
 		if valid(v[i]) {
 			continue
 		}
-		log.Printf("net/http: invalid byte %q in %s; dropping invalid bytes", v[i], fieldName)
+		log.Printf("github.com/josexy/xhttp: invalid byte %q in %s; dropping invalid bytes", v[i], fieldName)
 		ok = false
 		break
 	}

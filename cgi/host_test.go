@@ -16,7 +16,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"runtime"
 	"slices"
@@ -417,8 +416,7 @@ func TestCopyError(t *testing.T) {
 // handlerRunning reports whether any goroutine is currently running
 // [Handler.ServeHTTP].
 func handlerRunning() bool {
-	pkgPath := reflect.TypeOf((*Handler)(nil)).Elem().PkgPath()
-	r := regexp.MustCompile(regexp.QuoteMeta(pkgPath) + `\.\(\*Handler\)\.ServeHTTP`)
+	r := regexp.MustCompile(`github.com/josexy/xhttp/cgi\.\(\*Handler\)\.ServeHTTP`)
 	buf := make([]byte, 64<<10)
 	for {
 		n := runtime.Stack(buf, true)

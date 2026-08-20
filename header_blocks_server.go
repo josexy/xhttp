@@ -7,58 +7,41 @@ package http
 import (
 	"errors"
 	"fmt"
-	"io"
 	"net/textproto"
 	"slices"
 
-	"github.com/josexy/net/http/httpguts"
 	"github.com/josexy/xhttp/internal/ascii"
+	"golang.org/x/net/http/httpguts"
 )
 
 func (w *response) prepareRequestBodyForExactResponse() {
-	if expect, ok := w.req.Body.(*expectContinueReader); ok && !expect.sawEOF.Load() {
+	if w.ecReader != nil && w.reqBody.bodyRemains() {
 		w.closeAfterReply = true
 	}
-	if w.req.ContentLength == 0 || w.closeAfterReply || w.fullDuplex {
+	if w.req.ContentLength == 0 || w.reqBody == nil || w.closeAfterReply || w.fullDuplex {
 		return
 	}
 	var discard, tooBig bool
-	switch bdy := w.req.Body.(type) {
-	case *expectContinueReader:
-		// A fully-read expectContinueReader needs no further work.
-	case *body:
-		bdy.mu.Lock()
-		switch {
-		case bdy.closed:
-			if !bdy.sawEOF {
-				w.closeAfterReply = true
-			}
-		case bdy.unreadDataSizeLocked() >= maxPostHandlerReadBytes:
-			tooBig = true
-		default:
-			discard = true
+	w.reqBody.mu.Lock()
+	switch {
+	case w.reqBody.closed:
+		if !w.reqBody.sawEOF {
+			w.closeAfterReply = true
 		}
-		bdy.mu.Unlock()
+	case w.reqBody.unreadDataSizeLocked() >= maxPostHandlerReadBytes:
+		tooBig = true
 	default:
 		discard = true
 	}
+	w.reqBody.mu.Unlock()
 	if discard {
-		_, err := io.CopyN(io.Discard, w.reqBody, maxPostHandlerReadBytes+1)
-		switch err {
-		case nil:
-			tooBig = true
-		case ErrBodyReadAfterClose:
-		case io.EOF:
-			if err := w.reqBody.Close(); err != nil {
-				w.closeAfterReply = true
-			}
-		default:
+		w.reqBody.Close()
+		if w.reqBody.didEarlyClose() {
 			w.closeAfterReply = true
 		}
 	}
 	if tooBig {
-		w.requestBodyLimitHit = true
-		w.closeAfterReply = true
+		w.requestTooLarge()
 	}
 }
 
@@ -193,7 +176,7 @@ func (w *response) writeHTTP1HeaderBlock(block HeaderBlock) error {
 	}
 	if block.Kind == HeaderBlockInformational {
 		if block.StatusCode == StatusContinue {
-			w.disableWriteContinue()
+			w.disableWriteContinue(false)
 		}
 		writeStatusLine(w.conn.bufw, w.req.ProtoAtLeast(1, 1), block.StatusCode, w.statusBuf[:])
 		if err := writeExactHTTP1Fields(w.conn.bufw, block.Fields, nil); err != nil {
@@ -212,7 +195,7 @@ func (w *response) writeHTTP1HeaderBlock(block HeaderBlock) error {
 			return err
 		}
 	}
-	w.disableWriteContinue()
+	w.disableWriteContinue(true)
 	w.wroteHeader = true
 	w.status = block.StatusCode
 	w.exactHeaderBlock = &block

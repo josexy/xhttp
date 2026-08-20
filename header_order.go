@@ -13,9 +13,9 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/josexy/net/http/httpguts"
 	"github.com/josexy/xhttp/httptrace"
 	"github.com/josexy/xhttp/internal/ascii"
+	"golang.org/x/net/http/httpguts"
 )
 
 // HeaderOrder specifies the order in which HTTP/1 or HTTP/2 fields are

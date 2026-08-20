@@ -30,7 +30,7 @@ func ExampleNew() {
 		log.Fatal(err)
 	}
 
-	// All users of cookiejar should import "github.com/josexy/net/publicsuffix"
+	// All users of cookiejar should import "golang.org/x/net/publicsuffix"
 	jar, err := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
 	if err != nil {
 		log.Fatal(err)
