@@ -16,7 +16,7 @@ import (
 	"sync"
 	"weak"
 
-	"github.com/josexy/net/http/httpguts"
+	"golang.org/x/net/http/httpguts"
 )
 
 // HeaderField is one decoded or exact header field. HTTP/1 receive blocks

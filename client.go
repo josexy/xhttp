@@ -26,7 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/josexy/net/http/httpguts"
+	"golang.org/x/net/http/httpguts"
 )
 
 // A Client is an HTTP client. Its zero value ([DefaultClient]) is a

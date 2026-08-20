@@ -24,7 +24,7 @@ import (
 	"time"
 	_ "unsafe" // for go:linkname
 
-	"github.com/josexy/net/http2/hpack"
+	"golang.org/x/net/http2/hpack"
 )
 
 // TestTestClientConn demonstrates usage of testClientConn.

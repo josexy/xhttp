@@ -26,7 +26,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/josexy/net/http/httpguts"
+	"golang.org/x/net/http/httpguts"
 )
 
 var (

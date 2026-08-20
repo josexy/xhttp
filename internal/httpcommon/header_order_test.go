@@ -8,7 +8,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/josexy/net/http2/hpack"
+	"golang.org/x/net/http2/hpack"
 )
 
 func TestOrderHeaderFields(t *testing.T) {

@@ -19,7 +19,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/josexy/net/http/httpguts"
+	"golang.org/x/net/http/httpguts"
 )
 
 var respExcludeHeader = map[string]bool{

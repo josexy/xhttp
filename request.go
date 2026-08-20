@@ -29,8 +29,8 @@ import (
 	"sync"
 	_ "unsafe" // for linkname
 
-	"github.com/josexy/net/http/httpguts"
-	"github.com/josexy/net/idna"
+	"golang.org/x/net/http/httpguts"
+	"golang.org/x/net/idna"
 )
 
 const (
@@ -231,7 +231,7 @@ type Request struct {
 	// ":authority" pseudo-header field.
 	// It may be of the form "host:port". For international domain
 	// names, Host may be in Punycode or Unicode form. Use
-	// github.com/josexy/net/idna to convert it to either format if
+	// golang.org/x/net/idna to convert it to either format if
 	// needed.
 	// To prevent DNS rebinding attacks, server Handlers should
 	// validate that the Host header has a value for which the

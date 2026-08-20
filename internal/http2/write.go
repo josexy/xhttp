@@ -11,8 +11,8 @@ import (
 	"log"
 	"net/url"
 
-	"github.com/josexy/net/http/httpguts"
-	"github.com/josexy/net/http2/hpack"
+	"golang.org/x/net/http/httpguts"
+	"golang.org/x/net/http2/hpack"
 )
 
 // writeFramer is implemented by any type that is used to write frames.

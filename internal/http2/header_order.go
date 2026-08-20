@@ -11,9 +11,9 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/josexy/net/http/httpguts"
-	"github.com/josexy/net/http2/hpack"
 	"github.com/josexy/xhttp/internal/httpcommon"
+	"golang.org/x/net/http/httpguts"
+	"golang.org/x/net/http2/hpack"
 )
 
 // HeaderField is a decoded HTTP/2 header field.

@@ -17,9 +17,9 @@ import (
 
 	"github.com/josexy/xhttp/internal/httpsfv"
 
-	"github.com/josexy/net/http2/hpack"
+	"golang.org/x/net/http2/hpack"
 
-	"github.com/josexy/net/http/httpguts"
+	"golang.org/x/net/http/httpguts"
 )
 
 const frameHeaderLen = 9

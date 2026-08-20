@@ -14,7 +14,6 @@ import (
 	"crypto/sha1"
 	"crypto/tls"
 	"fmt"
-	"github.com/josexy/xhttp"
 	. "github.com/josexy/xhttp"
 	"github.com/josexy/xhttp/httptest"
 	"github.com/josexy/xhttp/httptrace"
@@ -30,26 +29,13 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
-
-	"github.com/josexy/net/quic"
-
-	_ "unsafe" // for linkname
-
-	_ "github.com/josexy/net/http3"
 )
-
-//go:linkname registerHTTP3Transport
-func registerHTTP3Transport(*http.Transport) <-chan *quic.Endpoint
-
-//go:linkname registerHTTP3Server
-func registerHTTP3Server(*http.Server) <-chan *quic.Endpoint
 
 type testMode string
 
@@ -58,7 +44,7 @@ const (
 	https1Mode           = testMode("https1")        // HTTPS/1.1
 	http2Mode            = testMode("h2")            // HTTP/2
 	http2UnencryptedMode = testMode("h2unencrypted") // HTTP/2
-	http3Mode            = testMode("h3")            // HTTP/3
+	http3Mode            = testMode("h3")            // Marker for protocol-specific assertions; not run here.
 )
 
 type (
@@ -66,20 +52,16 @@ type (
 	testSkipMode []testMode // default, minus these
 )
 
-// http3SkippedMode is a convenient alias for []testMode{http1Mode, http2Mode},
-// which was the default test mode used by run and runSynctest prior to HTTP/3
-// development.
-// As we work on getting github.com/josexy/xhttp tests to pass for our x/net HTTP/3
-// implementation, tests that still use http3SkippedMode are essentially a list
-// of TODOs on what work needs to be done for our HTTP/3 implementation to
-// reach basic feature parity with our HTTP/1 and HTTP/2 implementations
+// http3SkippedMode retains the upstream spelling for tests that explicitly
+// select the HTTP/1 and HTTP/2 modes. HTTP/3 integration belongs to the
+// github.com/josexy/net module and is not part of this package's test matrix.
 var http3SkippedMode = []testMode{http1Mode, http2Mode}
 
 func (m testMode) Scheme() string {
 	switch m {
 	case http1Mode, http2UnencryptedMode:
 		return "http"
-	case https1Mode, http2Mode, http3Mode:
+	case https1Mode, http2Mode:
 		return "https"
 	}
 	panic("unknown testMode")
@@ -105,7 +87,7 @@ type TBRun[T any] interface {
 // To disable parallel execution, pass the testNotParallel option.
 func run[T TBRun[T]](t T, f func(t T, mode testMode), opts ...any) {
 	t.Helper()
-	modes := []testMode{http1Mode, http2Mode, http3Mode}
+	modes := []testMode{http1Mode, http2Mode}
 	parallel := true
 	for _, opt := range opts {
 		switch opt := opt.(type) {
@@ -131,10 +113,6 @@ func run[T TBRun[T]](t T, f func(t T, mode testMode), opts ...any) {
 		setParallel(t)
 	}
 	for _, mode := range modes {
-		// TODO(nsh): re-enable the tests once tree re-opens.
-		if mode == http3Mode {
-			continue
-		}
 		t.Run(string(mode), func(t T) {
 			t.Helper()
 			if t, ok := any(t).(*testing.T); ok && parallel {
@@ -245,11 +223,6 @@ func newClientServerTest(t testing.TB, mode testMode, h Handler, opts ...any) *c
 				return cst.li.connect(), nil
 			}
 		})
-	case mode == http3Mode:
-		// TODO: support testing HTTP/3 using fakenet.
-		cst.ts = &httptest.Server{
-			Config: &Server{Handler: h},
-		}
 	default:
 		cst.ts = httptest.NewUnstartedServer(h)
 	}
@@ -290,37 +263,6 @@ func newClientServerTest(t testing.TB, mode testMode, h Handler, opts ...any) *c
 		cst.ts.EnableHTTP2 = true
 		cst.ts.TLS = cst.ts.Config.TLSConfig
 		cst.ts.StartTLS()
-	case http3Mode:
-		http.ProtocolSetHTTP3(p)
-		cst.ts.TLS = cst.ts.Config.TLSConfig
-		cst.ts.StartTLS()
-		endpointCh := registerHTTP3Server(cst.ts.Config)
-
-		cst.ts.Config.TLSConfig = cst.ts.TLS
-		cst.ts.Config.Addr = ":0"
-		go cst.ts.Config.ListenAndServeTLS("", "")
-
-		endpoint := <-endpointCh
-		port := strconv.Itoa(int(endpoint.LocalAddr().Port()))
-		switch addr := endpoint.LocalAddr().Addr(); {
-		case !addr.IsUnspecified():
-			cst.ts.URL = "https://" + endpoint.LocalAddr().String()
-		case addr.Is4():
-			cst.ts.URL = "https://" + net.JoinHostPort("127.0.0.1", port)
-		case addr.Is6():
-			cst.ts.URL = "https://" + net.JoinHostPort("::1", port)
-		default:
-			t.Fatalf("unknown address family for %v", endpoint.LocalAddr())
-		}
-		t.Cleanup(func() {
-			// Give a relatively generous timeout. If the timeout is too short,
-			// the test might return before QUIC connections can finish closing
-			// asynchronously in some builders. The open connections will cause
-			// TestMain to detect a goroutine leak and fail.
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			cst.ts.Config.Shutdown(ctx)
-		})
 	default:
 		t.Fatalf("unknown test mode %v", mode)
 	}
@@ -332,32 +274,6 @@ func newClientServerTest(t testing.TB, mode testMode, h Handler, opts ...any) *c
 	if cst.tr.Protocols == nil {
 		cst.tr.Protocols = p
 	}
-	if mode == http3Mode {
-		endpointCh := registerHTTP3Transport(cst.tr)
-		testDoneCh := make(chan any)
-		var wg sync.WaitGroup
-		t.Cleanup(func() {
-			close(testDoneCh)
-			wg.Wait()
-		})
-		wg.Go(func() {
-			for {
-				select {
-				case e := <-endpointCh:
-					t.Cleanup(func() {
-						ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-						defer cancel()
-						if e != nil {
-							e.Close(ctx)
-						}
-					})
-				case <-testDoneCh:
-					return
-				}
-			}
-		})
-	}
-
 	t.Cleanup(func() {
 		cst.close()
 	})

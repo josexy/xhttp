@@ -50,8 +50,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/josexy/net/http/httpguts"
-	"github.com/josexy/net/http2/hpack"
+	"golang.org/x/net/http/httpguts"
+	"golang.org/x/net/http2/hpack"
 )
 
 const (

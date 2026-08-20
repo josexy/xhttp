@@ -15,7 +15,7 @@ import (
 
 	"github.com/josexy/xhttp/internal/httpcommon"
 
-	"github.com/josexy/net/http2/hpack"
+	"golang.org/x/net/http2/hpack"
 )
 
 func init() {

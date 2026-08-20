@@ -7,7 +7,7 @@ package httpcommon
 import (
 	"sort"
 
-	"github.com/josexy/net/http2/hpack"
+	"golang.org/x/net/http2/hpack"
 )
 
 // OrderHeaderFields groups fields by name and returns them in order. Listed

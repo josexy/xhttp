@@ -36,7 +36,7 @@ import (
 	. "github.com/josexy/xhttp/internal/http2"
 	"github.com/josexy/xhttp/internal/testcert"
 
-	"github.com/josexy/net/http2/hpack"
+	"golang.org/x/net/http2/hpack"
 )
 
 var stderrVerbose = flag.Bool("stderr_verbose", false, "Mirror verbosity to stderr, unbuffered")

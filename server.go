@@ -33,7 +33,7 @@ import (
 	"time"
 	_ "unsafe" // for linkname
 
-	"github.com/josexy/net/http/httpguts"
+	"golang.org/x/net/http/httpguts"
 )
 
 // Errors used by the HTTP server.

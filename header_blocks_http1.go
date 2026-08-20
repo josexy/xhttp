@@ -12,10 +12,10 @@ import (
 	"net/textproto"
 	"strings"
 
-	"github.com/josexy/net/http/httpguts"
 	"github.com/josexy/xhttp/httptrace"
 	"github.com/josexy/xhttp/internal"
 	"github.com/josexy/xhttp/internal/ascii"
+	"golang.org/x/net/http/httpguts"
 )
 
 type http1ExactRequestPlan struct {

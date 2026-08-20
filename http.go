@@ -12,7 +12,7 @@ import (
 	"unicode/utf8"
 	_ "unsafe"
 
-	"github.com/josexy/net/http/httpguts"
+	"golang.org/x/net/http/httpguts"
 )
 
 // Protocols is a set of HTTP protocols.

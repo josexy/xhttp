@@ -16,7 +16,7 @@ import (
 
 	. "github.com/josexy/xhttp/internal/http2"
 
-	"github.com/josexy/net/http2/hpack"
+	"golang.org/x/net/http2/hpack"
 )
 
 type testConnFramer struct {

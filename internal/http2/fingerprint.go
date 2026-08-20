@@ -15,7 +15,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/josexy/net/http2/hpack"
+	"golang.org/x/net/http2/hpack"
 )
 
 // Fingerprint is a four-part HTTP/2 frame fingerprint consisting of SETTINGS,

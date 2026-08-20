@@ -35,8 +35,8 @@ import (
 	"time"
 	_ "unsafe"
 
-	"github.com/josexy/net/http/httpguts"
-	"github.com/josexy/net/http/httpproxy"
+	"golang.org/x/net/http/httpguts"
+	"golang.org/x/net/http/httpproxy"
 )
 
 // DefaultTransport is the default implementation of [Transport] and is
