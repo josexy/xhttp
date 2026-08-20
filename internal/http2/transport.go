@@ -96,6 +96,20 @@ func (t *Transport) maxHeaderListSize() uint32 {
 	return uint32(n)
 }
 
+func (t *Transport) responseHeaderBlockCaptureLimit() int64 {
+	limit := int64(t.maxHeaderListSize())
+	if t1 := t.t1; t1 != nil && t1.MaxResponseHeaderBytes() > limit {
+		limit = t1.MaxResponseHeaderBytes()
+	}
+	if limit <= 0 {
+		limit = 10 << 20
+	}
+	if limit < minResponseHeaderBlockCaptureSize {
+		return minResponseHeaderBlockCaptureSize
+	}
+	return limit
+}
+
 func (t *Transport) disableCompression() bool {
 	return t.t1 != nil && t.t1.DisableCompression()
 }
@@ -280,12 +294,14 @@ type clientStream struct {
 	sentHeaders   bool
 
 	// owned by clientConnReadLoop:
-	firstByte       bool  // got the first response byte
-	pastHeaders     bool  // got first MetaHeadersFrame (actual headers)
-	pastTrailers    bool  // got optional second MetaHeadersFrame (trailers)
-	readClosed      bool  // peer sent an END_STREAM flag
-	readAborted     bool  // read loop reset the stream
-	totalHeaderSize int64 // total size of 1xx headers seen
+	firstByte          bool  // got the first response byte
+	pastHeaders        bool  // got first MetaHeadersFrame (actual headers)
+	pastTrailers       bool  // got optional second MetaHeadersFrame (trailers)
+	readClosed         bool  // peer sent an END_STREAM flag
+	readAborted        bool  // read loop reset the stream
+	totalHeaderSize    int64 // total size of 1xx headers seen
+	capturedHeaderSize int64 // estimated memory retained by response header blocks
+	headerBlockLimit   int64 // maximum capturedHeaderSize
 
 	trailer    Header  // accumulated trailers
 	resTrailer *Header // client's Response.Trailer
@@ -302,6 +318,25 @@ func (cs *clientStream) get1xxTraceFunc() func(int, textproto.MIMEHeader) error 
 		return fn
 	}
 	return traceGot1xxResponseFunc(cs.trace)
+}
+
+const (
+	capturedHeaderBlockBaseSize       int64 = 64
+	capturedHeaderFieldBaseSize       int64 = 48
+	minResponseHeaderBlockCaptureSize       = 64 << 10
+)
+
+func (cs *clientStream) captureResponseHeaderBlock(kind HeaderBlockKind, fields []hpack.HeaderField, truncated bool) error {
+	size := capturedHeaderBlockBaseSize
+	for _, field := range fields {
+		size += capturedHeaderFieldBaseSize + int64(len(field.Name)+len(field.Value))
+	}
+	if cs.headerBlockLimit <= 0 || size > cs.headerBlockLimit || cs.capturedHeaderSize > cs.headerBlockLimit-size {
+		return fmt.Errorf("http2: captured response header blocks exceeded %d bytes", cs.headerBlockLimit)
+	}
+	cs.capturedHeaderSize += size
+	cs.headerBlocks.add(kind, fields, truncated)
+	return nil
 }
 
 func (cs *clientStream) abortStream(err error) {
@@ -1219,6 +1254,7 @@ func (cc *ClientConn) roundTrip(req *ClientRequest, streamf func(*clientStream))
 		headerBlocksToWrite:          requestHeaderBlocksToWrite(ctx),
 		headerPriority:               headerPriority,
 		headerBlocks:                 new(headerBlockStore),
+		headerBlockLimit:             cc.t.responseHeaderBlockCaptureLimit(),
 		informationalResponseHandler: informationalResponseHandler(ctx),
 	}
 	cs := &req.stream
@@ -2423,7 +2459,9 @@ func (rl *clientConnReadLoop) handleResponse(cs *clientStream, f *MetaHeadersFra
 	if statusCode >= 100 && statusCode <= 199 {
 		headerBlockKind = HeaderBlockInformational
 	}
-	cs.headerBlocks.add(headerBlockKind, f.Fields, f.Truncated)
+	if err := cs.captureResponseHeaderBlock(headerBlockKind, f.Fields, f.Truncated); err != nil {
+		return nil, err
+	}
 
 	regularFields := f.RegularFields()
 	strs := make([]string, len(regularFields))

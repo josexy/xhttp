@@ -2942,6 +2942,9 @@ func (w *responseWriter) WriteHeaderBlock(block HeaderBlock) error {
 	if rws == nil {
 		return errors.New("http2: WriteResponseHeaderBlock called after Handler finished")
 	}
+	if err := validateResponseHeaderBlock(block); err != nil {
+		return err
+	}
 	fields := hpackHeaderFields(block.Fields)
 	if block.Kind == HeaderBlockInformational {
 		if rws.wroteHeader || rws.streamEnded {
@@ -2977,6 +2980,9 @@ func (w *responseWriter) SetTrailerBlock(block HeaderBlock) error {
 	rws := w.rws
 	if rws == nil {
 		return errors.New("http2: SetResponseTrailerBlock called after Handler finished")
+	}
+	if err := validateTrailerHeaderBlock(block); err != nil {
+		return err
 	}
 	if rws.streamEnded {
 		return errors.New("http2: SetResponseTrailerBlock called after the response stream ended")

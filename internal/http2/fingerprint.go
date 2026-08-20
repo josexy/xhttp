@@ -83,10 +83,15 @@ var fingerprintTokenPseudoHeader = map[string]string{
 	"p": ":path",
 }
 
+const (
+	maxFingerprintSettings   = 100
+	maxFingerprintPriorities = 100
+)
+
 // Validate reports whether f is a complete, safely replayable HTTP/2
 // fingerprint.
 func (f Fingerprint) Validate() error {
-	if len(f.Settings) > 100 {
+	if len(f.Settings) > maxFingerprintSettings {
 		return errors.New("http2: fingerprint has too many settings")
 	}
 	seenSettings := make(map[SettingID]bool, len(f.Settings))
@@ -109,6 +114,9 @@ func (f Fingerprint) Validate() error {
 		return fmt.Errorf("http2: invalid fingerprint window update %d", f.WindowUpdate)
 	}
 
+	if len(f.Priorities) > maxFingerprintPriorities {
+		return errors.New("http2: fingerprint has too many priorities")
+	}
 	for i, priority := range f.Priorities {
 		if err := validateFingerprintPriority(i, priority); err != nil {
 			return err
@@ -480,7 +488,11 @@ func (c *fingerprintCollector) captureWindowUpdate(f *WindowUpdateFrame) {
 }
 
 func (c *fingerprintCollector) capturePriority(streamID uint32, p PriorityParam) {
-	if c.frozen {
+	// Retain one entry past the public validation limit so an overflowed
+	// collector produces an invalid fingerprint instead of silently treating a
+	// truncated PRIORITY sequence as exact. Further frames are ignored to keep
+	// memory bounded until the first request HEADERS frame freezes collection.
+	if c.frozen || len(c.priorities) > maxFingerprintPriorities {
 		return
 	}
 	c.priorities = append(c.priorities, FingerprintPriority{

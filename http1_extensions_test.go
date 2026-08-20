@@ -7,6 +7,7 @@ package http
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/textproto"
@@ -99,6 +100,45 @@ func TestHTTP1RequestHeaderBlocksCaptureOrderAndTrailer(t *testing.T) {
 	}
 }
 
+func TestHTTP1RequestHeaderBlocksSurviveContextReplacement(t *testing.T) {
+	const wire = "GET / HTTP/1.1\r\n" +
+		"Host: example.test\r\n" +
+		"X-Exact: yes\r\n\r\n"
+	req, err := ReadRequest(bufio.NewReader(strings.NewReader(wire)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := []*Request{
+		req.WithContext(context.Background()),
+		req.Clone(context.Background()),
+	}
+	for _, gotReq := range requests {
+		blocks := RequestHeaderBlocks(gotReq)
+		if len(blocks) != 1 || len(blocks[0].Fields) != 2 || blocks[0].Fields[1].Name != "X-Exact" {
+			t.Fatalf("RequestHeaderBlocks = %#v", blocks)
+		}
+	}
+}
+
+func TestHTTP1RequestHeaderBlocksSurviveTimeoutHandler(t *testing.T) {
+	blocks := make(chan []HeaderBlock, 1)
+	h := TimeoutHandler(HandlerFunc(func(w ResponseWriter, r *Request) {
+		blocks <- RequestHeaderBlocks(r)
+		w.WriteHeader(StatusNoContent)
+	}), time.Second, "timeout")
+	url, closeServer := startHTTP1TestServer(t, h)
+	defer closeServer()
+
+	resp, err := Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if got := <-blocks; len(got) != 1 {
+		t.Fatalf("RequestHeaderBlocks = %#v", got)
+	}
+}
+
 func TestHTTP1InformationalHandlerBeforeTraceAndBlocksAggregate(t *testing.T) {
 	ln := newOneShotListener(t, func(conn net.Conn) {
 		defer conn.Close()
@@ -145,6 +185,55 @@ func TestHTTP1InformationalHandlerBeforeTraceAndBlocksAggregate(t *testing.T) {
 	blocks := ResponseHeaderBlocks(resp)
 	if len(blocks) != 2 || blocks[0].Kind != HeaderBlockInformational || blocks[0].StatusCode != 103 || blocks[1].StatusCode != 200 {
 		t.Fatalf("response blocks = %#v", blocks)
+	}
+}
+
+func TestHTTP1CapturedInformationalResponsesRespectBudget(t *testing.T) {
+	headerValue := strings.Repeat("a", 128)
+	ack := make(chan struct{})
+	done := make(chan struct{})
+	ln := newOneShotListener(t, func(conn net.Conn) {
+		defer conn.Close()
+		readThroughBlankLine(bufio.NewReader(conn))
+		for range 512 {
+			if _, err := io.WriteString(conn, "HTTP/1.1 103 Early Hints\r\nX-Hint: "+headerValue+"\r\n\r\n"); err != nil {
+				return
+			}
+			select {
+			case <-ack:
+			case <-done:
+				return
+			}
+		}
+		io.WriteString(conn, "HTTP/1.1 204 No Content\r\n\r\n")
+	})
+
+	trace := &httptrace.ClientTrace{Got1xxResponse: func(int, textproto.MIMEHeader) error {
+		select {
+		case ack <- struct{}{}:
+			return nil
+		case <-done:
+			return errors.New("request finished")
+		}
+	}}
+	req, err := NewRequestWithContext(
+		httptrace.WithClientTrace(context.Background(), trace),
+		"GET",
+		"http://"+ln.Addr().String()+"/",
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &Transport{MaxResponseHeaderBytes: 512, DisableKeepAlives: true}
+	resp, err := (&Client{Transport: transport}).Do(req)
+	close(done)
+	if err == nil {
+		resp.Body.Close()
+		t.Fatal("request succeeded after captured 1xx blocks exceeded the response header budget")
+	}
+	if !strings.Contains(err.Error(), "captured response header blocks exceeded") {
+		t.Fatalf("Do error = %v; want captured response header blocks exceeded", err)
 	}
 }
 

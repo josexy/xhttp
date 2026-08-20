@@ -2692,12 +2692,16 @@ func (pc *persistConn) readResponse(rc requestAndChan, trace *httptrace.ClientTr
 
 	continueCh := rc.continueCh
 	allHeaderBlocks := &headerBlockStore{}
+	capturedHeaderBytes := int64(0)
 	for {
 		resp, err = ReadResponse(pc.br, rc.treq.Request)
 		if err != nil {
 			return
 		}
-		allHeaderBlocks.appendFrom(responseHeaderBlockStore(resp))
+		captureLimit := responseHeaderBlockCaptureLimit(pc.maxHeaderResponseSize())
+		if !allHeaderBlocks.appendFromWithinLimit(responseHeaderBlockStore(resp), &capturedHeaderBytes, captureLimit) {
+			return nil, fmt.Errorf("github.com/josexy/xhttp: captured response header blocks exceeded %d bytes", captureLimit)
+		}
 		resCode := resp.StatusCode
 		if continueCh != nil && resCode == StatusContinue {
 			if trace != nil && trace.Got100Continue != nil {

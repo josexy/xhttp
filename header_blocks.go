@@ -63,6 +63,22 @@ type headerBlockStore struct {
 	blocks []HeaderBlock
 }
 
+const (
+	headerBlockCaptureBaseSize        int64 = 64
+	headerFieldCaptureBaseSize        int64 = 48
+	minResponseHeaderBlockCaptureSize       = 64 << 10
+)
+
+func responseHeaderBlockCaptureLimit(configured int64) int64 {
+	// MaxResponseHeaderBytes is also a per-wire-block compatibility knob. Keep
+	// a modest independent floor so small configured values don't unexpectedly
+	// limit callbacks that deliberately accept multiple 1xx responses.
+	if configured < minResponseHeaderBlockCaptureSize {
+		return minResponseHeaderBlockCaptureSize
+	}
+	return configured
+}
+
 func cloneHeaderBlock(block HeaderBlock) HeaderBlock {
 	block.Fields = append([]HeaderField(nil), block.Fields...)
 	return block
@@ -78,13 +94,37 @@ func (s *headerBlockStore) add(block HeaderBlock) {
 	s.mu.Unlock()
 }
 
-func (s *headerBlockStore) appendFrom(other *headerBlockStore) {
-	if s == nil || other == nil || s == other {
-		return
+func headerBlockCaptureSize(block HeaderBlock) int64 {
+	size := headerBlockCaptureBaseSize
+	for _, field := range block.Fields {
+		// Include conservative bookkeeping for the HeaderField value in
+		// addition to the string data retained by the capture store.
+		size += headerFieldCaptureBaseSize + int64(len(field.Name)+len(field.Value))
 	}
-	for _, block := range other.snapshot() {
+	return size
+}
+
+func (s *headerBlockStore) appendFromWithinLimit(other *headerBlockStore, used *int64, limit int64) bool {
+	if s == nil || other == nil || s == other {
+		return true
+	}
+	blocks := other.snapshot()
+	var additional int64
+	for _, block := range blocks {
+		size := headerBlockCaptureSize(block)
+		if size > limit || additional > limit-size {
+			return false
+		}
+		additional += size
+	}
+	if *used > limit-additional {
+		return false
+	}
+	for _, block := range blocks {
 		s.add(block)
 	}
+	*used += additional
+	return true
 }
 
 func (s *headerBlockStore) snapshot() []HeaderBlock {
@@ -165,6 +205,15 @@ func requestHeaderBlockStore(req *Request) *headerBlockStore {
 	requestHeaderBlockStores.RUnlock()
 	runtime.KeepAlive(req)
 	return store
+}
+
+func inheritRequestHeaderBlockStore(dst, src *Request) {
+	if dst == nil || src == nil {
+		return
+	}
+	if store := requestHeaderBlockStore(src); store != nil {
+		registerRequestHeaderBlocks(dst, store)
+	}
 }
 
 func registerResponseHeaderBlocks(resp *Response, store *headerBlockStore) {
@@ -475,25 +524,38 @@ func SetResponseTrailerBlock(w ResponseWriter, block HeaderBlock) error {
 	}
 	proto := headerBlockProtocol(block)
 	if proto == 1 {
-		if err := validateHTTP1HeaderBlock(block, HeaderBlockTrailer); err != nil {
-			return err
-		}
-		if block.StatusCode != 0 {
-			return errors.New("http: exact HTTP/1 trailer block must not contain StatusCode")
+		if block.ProtoMajor == 1 {
+			if err := validateHTTP1HeaderBlock(block, HeaderBlockTrailer); err != nil {
+				return err
+			}
+			if block.StatusCode != 0 {
+				return errors.New("http: exact HTTP/1 trailer block must not contain StatusCode")
+			}
 		}
 		writer, ok, err := findHTTP1ResponseHeaderBlockWriter(w)
 		if err != nil {
 			return fmt.Errorf("http: set response trailer block: %w", err)
 		}
 		if ok {
+			if block.ProtoMajor == 0 {
+				if err := validateHTTP1HeaderBlock(block, HeaderBlockTrailer); err != nil {
+					return err
+				}
+				if block.StatusCode != 0 {
+					return errors.New("http: exact HTTP/1 trailer block must not contain StatusCode")
+				}
+			}
 			return writer.setHTTP1TrailerBlock(cloneHeaderBlock(block))
 		}
-		// ProtoMajor zero is ambiguous for an empty HTTP/2 trailer block.
 		if block.ProtoMajor == 1 {
 			return fmt.Errorf("http: set response trailer block: %w", errors.ErrUnsupported)
 		}
+		// A trailer without pseudo-headers and with ProtoMajor zero is
+		// ambiguous. If the concrete writer is not HTTP/1, let the HTTP/2
+		// bridge and its protocol-specific validator decide.
+		proto = 2
 	}
-	if proto != 1 && proto != 2 {
+	if proto != 2 {
 		return fmt.Errorf("http: unsupported exact header block protocol %d", proto)
 	}
 	if block.StatusCode != 0 {

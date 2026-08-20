@@ -377,6 +377,7 @@ func (r *Request) WithContext(ctx context.Context) *Request {
 	r2 := new(Request)
 	*r2 = *r
 	r2.ctx = ctx
+	inheritRequestHeaderBlockStore(r2, r)
 	return r2
 }
 
@@ -395,6 +396,7 @@ func (r *Request) Clone(ctx context.Context) *Request {
 	r2 := new(Request)
 	*r2 = *r
 	r2.ctx = ctx
+	inheritRequestHeaderBlockStore(r2, r)
 	r2.URL = cloneURL(r.URL)
 	r2.Header = r.Header.Clone()
 	r2.Trailer = r.Trailer.Clone()

@@ -11,13 +11,16 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/textproto"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/josexy/xhttp"
 	"github.com/josexy/xhttp/httptest"
+	"github.com/josexy/xhttp/httptrace"
 )
 
 func TestHTTP1ExactRequestRejectedOnNegotiatedHTTP2(t *testing.T) {
@@ -69,7 +72,7 @@ func TestHTTP2TrailerBlockWithZeroMetadataStillDispatches(t *testing.T) {
 		}
 		errCh <- http.SetResponseTrailerBlock(w, http.HeaderBlock{
 			Kind:   http.HeaderBlockTrailer,
-			Fields: []http.HeaderField{{Name: "x-trailer", Value: "done"}},
+			Fields: []http.HeaderField{{Name: "x-trailer", Value: "done", Sensitive: true}},
 		})
 	}))
 	server.EnableHTTP2 = true
@@ -88,8 +91,48 @@ func TestHTTP2TrailerBlockWithZeroMetadataStillDispatches(t *testing.T) {
 		t.Fatal(err)
 	}
 	blocks := http.ResponseHeaderBlocks(resp)
-	if len(blocks) != 2 || blocks[1].Kind != http.HeaderBlockTrailer || blocks[1].ProtoMajor != 0 {
+	if len(blocks) != 2 || blocks[1].Kind != http.HeaderBlockTrailer || blocks[1].ProtoMajor != 0 ||
+		len(blocks[1].Fields) != 1 || !blocks[1].Fields[0].Sensitive {
 		t.Fatalf("blocks = %#v", blocks)
+	}
+}
+
+func TestHTTP2CapturedInformationalResponsesRespectBudget(t *testing.T) {
+	headerValue := strings.Repeat("a", 128)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Hint", headerValue)
+		for range 512 {
+			w.WriteHeader(http.StatusEarlyHints)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+
+	client := server.Client()
+	transport := client.Transport.(*http.Transport).Clone()
+	transport.MaxResponseHeaderBytes = 512
+	client.Transport = transport
+	trace := &httptrace.ClientTrace{Got1xxResponse: func(int, textproto.MIMEHeader) error {
+		return nil
+	}}
+	req, err := http.NewRequestWithContext(
+		httptrace.WithClientTrace(context.Background(), trace),
+		"GET",
+		server.URL,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(req)
+	if err == nil {
+		resp.Body.Close()
+		t.Fatal("request succeeded after captured 1xx blocks exceeded the response header budget")
+	}
+	if !strings.Contains(err.Error(), "captured response header blocks exceeded") {
+		t.Fatalf("Do error = %v; want captured response header blocks exceeded", err)
 	}
 }
 
