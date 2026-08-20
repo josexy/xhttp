@@ -7,8 +7,11 @@
 package http_test
 
 import (
+	"context"
 	"io"
+	"net"
 	"reflect"
+	"strconv"
 	"sync/atomic"
 	"testing"
 
@@ -146,6 +149,81 @@ func TestHTTP2FingerprintExtensions(t *testing.T) {
 	storedAgain, _ := http.RequestFingerprint(req)
 	if !reflect.DeepEqual(storedAgain, fingerprint) {
 		t.Fatal("RequestFingerprint returned mutable shared state")
+	}
+}
+
+func TestHTTP2FingerprintTransportReplayAndPooling(t *testing.T) {
+	observed := make(chan http.Fingerprint, 4)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fingerprint, ok := http.RequestFingerprint(r)
+		if !ok {
+			http.Error(w, "missing HTTP/2 fingerprint", http.StatusInternalServerError)
+			return
+		}
+		observed <- fingerprint
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+
+	transport := server.Client().Transport.(*http.Transport).Clone()
+	transport.DisableCompression = true
+	var dials atomic.Int32
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		dials.Add(1)
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport}
+
+	base := http.Fingerprint{
+		Settings: []http.Setting{
+			{ID: http.SettingHeaderTableSize, Val: 65536},
+			{ID: http.SettingMaxConcurrentStreams, Val: 1000},
+			{ID: http.SettingInitialWindowSize, Val: 6291456},
+			{ID: http.SettingMaxHeaderListSize, Val: 262144},
+		},
+		WindowUpdate: 15663105,
+		Priorities: []http.FingerprintPriority{
+			{StreamID: 3, StreamDep: 0, Weight: 201},
+			{StreamID: 5, StreamDep: 3, Exclusive: true, Weight: 101},
+		},
+		HeaderPriority:    &http.FingerprintHeaderPriority{StreamDep: 0, Weight: 1},
+		PseudoHeaderOrder: []string{":method", ":authority", ":scheme", ":path"},
+	}
+	differentPseudoOrder := base
+	differentPseudoOrder.PseudoHeaderOrder = []string{":scheme", ":method", ":authority", ":path"}
+	differentHeaderPriority := base
+	differentHeaderPriority.HeaderPriority = &http.FingerprintHeaderPriority{StreamDep: 0, Exclusive: true, Weight: 33}
+	differentConnection := base
+	differentConnection.Settings = append([]http.Setting(nil), base.Settings...)
+	differentConnection.Settings[0].Val = 32768
+
+	wants := []http.Fingerprint{base, differentPseudoOrder, differentHeaderPriority, differentConnection}
+	for i, fingerprint := range wants {
+		req, err := http.NewRequest(http.MethodGet, server.URL+"/request-"+strconv.Itoa(i), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req, err = http.WithRequestFingerprint(req, fingerprint)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+
+	for i, want := range wants {
+		if got := <-observed; !reflect.DeepEqual(got, want) {
+			t.Fatalf("request %d fingerprint = %#v; want %#v", i, got, want)
+		}
+	}
+	if got, want := dials.Load(), int32(2); got != want {
+		t.Fatalf("dial count = %d; want %d", got, want)
 	}
 }
 

@@ -262,7 +262,7 @@ func (rw *ResponseRecorder) Result() *http.Response {
 // parseContentLength trims whitespace from s and returns -1 if no value
 // is set, or the value if it's >= 0.
 //
-// This a modified version of same function found in net/http/transfer.go. This
+// This a modified version of same function found in github.com/josexy/xhttp/transfer.go. This
 // one just ignores an invalid header.
 func parseContentLength(cl string) int64 {
 	cl = textproto.TrimString(cl)

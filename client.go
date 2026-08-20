@@ -25,6 +25,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/josexy/net/http/httpguts"
 )
 
 // A Client is an HTTP client. Its zero value ([DefaultClient]) is a
@@ -329,7 +331,7 @@ func knownRoundTripperImpl(rt RoundTripper, req *Request) bool {
 			return knownRoundTripperImpl(altRT, req)
 		}
 		return true
-	case *http2Transport, http2noDialH2RoundTripper:
+	case http2RoundTripper:
 		return true
 	}
 	// There's a very minor chance of a false positive with this.
@@ -495,7 +497,7 @@ func alwaysFalse() bool { return false }
 // control how redirects are processed. If returned, the next request
 // is not sent and the most recent response is returned with its body
 // unclosed.
-var ErrUseLastResponse = errors.New("net/http: use last response")
+var ErrUseLastResponse = errors.New("github.com/josexy/xhttp: use last response")
 
 // checkRedirect calls either the user's configured CheckRedirect
 // function, or the default.
@@ -565,6 +567,9 @@ func urlErrorOp(method string) string {
 // read to EOF and closed, the [Client]'s underlying [RoundTripper]
 // (typically [Transport]) may not be able to re-use a persistent TCP
 // connection to the server for a subsequent "keep-alive" request.
+// Note, however, that [Transport] will automatically try to read a
+// [Response] Body to EOF asynchronously up to a conservative limit
+// when a Body is closed.
 //
 // The request Body, if non-nil, will be closed by the underlying
 // Transport, even on errors. The Body may be closed asynchronously after
@@ -585,6 +590,13 @@ func urlErrorOp(method string) string {
 // provided that the [Request.GetBody] function is defined.
 // The [NewRequest] function automatically sets GetBody for common
 // standard library body types.
+//
+// Note that the [Client] redirect behavior does not follow the WHATWG
+// Fetch standard. This is because it was written before established
+// standards existed. As such, by modern standards, [Client] has a
+// rather permissive behavior. For example, sensitive headers are
+// retained on redirect to a subdomain or to a different scheme on the
+// same host.
 //
 // Any returned error will be of type [*url.Error]. The url.Error
 // value's Timeout method will report true if the request timed out.
@@ -1020,9 +1032,14 @@ func shouldCopyHeaderOnRedirect(initial, dest *url.URL) bool {
 	// directly, we don't know their scope, so we assume
 	// it's for *.domain.com.
 
-	ihost := idnaASCIIFromURL(initial)
-	dhost := idnaASCIIFromURL(dest)
-	return isDomainOrSubdomain(dhost, ihost)
+	ihost, err1 := httpguts.PunycodeHostPort(initial.Hostname())
+	dhost, err2 := httpguts.PunycodeHostPort(dest.Hostname())
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	ihost, ok1 := ascii.ToLower(ihost)
+	dhost, ok2 := ascii.ToLower(dhost)
+	return ok1 && ok2 && isDomainOrSubdomain(dhost, ihost)
 }
 
 // isDomainOrSubdomain reports whether sub is a subdomain (or exact

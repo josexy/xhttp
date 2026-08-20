@@ -586,7 +586,7 @@ var reqWriteTests = []reqWriteTest{
 				RawQuery: "new\nline", // or any CTL
 			},
 		},
-		WantError: errors.New("net/http: can't write control character in Request.URL"),
+		WantError: errors.New("github.com/josexy/xhttp: can't write control character in Request.URL"),
 	},
 
 	26: { // Request with nil body and PATCH method. Issue #40978
@@ -607,6 +607,121 @@ var reqWriteTests = []reqWriteTest{
 			"Host: example.com\r\n" +
 			"User-Agent: Go-http-client/1.1\r\n" +
 			"Content-Length: 0\r\n\r\n",
+	},
+
+	// Valid Trailer keeps working after trailer validation. Issue #78775
+	27: {
+		Req: Request{
+			Method: "POST",
+			URL: &url.URL{
+				Scheme: "http",
+				Host:   "example.com",
+				Path:   "/",
+			},
+			ProtoMajor:       1,
+			ProtoMinor:       1,
+			Header:           Header{},
+			TransferEncoding: []string{"chunked"},
+			Trailer:          Header{"X-Trailer": {"ok"}},
+		},
+
+		Body: []byte("abcdef"),
+
+		WantWrite: "POST / HTTP/1.1\r\n" +
+			"Host: example.com\r\n" +
+			"User-Agent: Go-http-client/1.1\r\n" +
+			"Transfer-Encoding: chunked\r\n" +
+			"Trailer: X-Trailer\r\n\r\n" +
+			chunk("abcdef") +
+			"0\r\n" +
+			"X-Trailer: ok\r\n" +
+			"\r\n",
+	},
+
+	// Trailer names with control characters must not reach the wire,
+	// where they would permit header injection on the "Trailer:" line.
+	// Issue #78775
+	28: {
+		Req: Request{
+			Method: "POST",
+			URL: &url.URL{
+				Scheme: "http",
+				Host:   "example.com",
+				Path:   "/",
+			},
+			ProtoMajor:       1,
+			ProtoMinor:       1,
+			Header:           Header{},
+			TransferEncoding: []string{"chunked"},
+			Trailer:          Header{"X-Trailer\r\nInjected: 1": {"ok"}},
+		},
+
+		Body: []byte("abcdef"),
+
+		WantError: errors.New(`github.com/josexy/xhttp: invalid trailer field name "X-Trailer\r\nInjected: 1"`),
+	},
+
+	// Trailer values with control characters are rejected as well. Issue #78775
+	29: {
+		Req: Request{
+			Method: "POST",
+			URL: &url.URL{
+				Scheme: "http",
+				Host:   "example.com",
+				Path:   "/",
+			},
+			ProtoMajor:       1,
+			ProtoMinor:       1,
+			Header:           Header{},
+			TransferEncoding: []string{"chunked"},
+			Trailer:          Header{"X-Trailer": {"evil\r\nInjected: 1"}},
+		},
+
+		Body: []byte("abcdef"),
+
+		WantError: errors.New(`github.com/josexy/xhttp: invalid trailer field value for "X-Trailer"`),
+	},
+
+	// An empty Trailer name is rejected. Issue #78775
+	30: {
+		Req: Request{
+			Method: "POST",
+			URL: &url.URL{
+				Scheme: "http",
+				Host:   "example.com",
+				Path:   "/",
+			},
+			ProtoMajor:       1,
+			ProtoMinor:       1,
+			Header:           Header{},
+			TransferEncoding: []string{"chunked"},
+			Trailer:          Header{"": {"ok"}},
+		},
+
+		Body: []byte("abcdef"),
+
+		WantError: errors.New(`github.com/josexy/xhttp: invalid trailer field name ""`),
+	},
+
+	// A later (non-first) value in a Trailer is validated too. Issue #78775
+	31: {
+		Req: Request{
+			Method: "POST",
+			URL: &url.URL{
+				Scheme: "http",
+				Host:   "example.com",
+				Path:   "/",
+			},
+			ProtoMajor:       1,
+			ProtoMinor:       1,
+			Header:           Header{},
+			TransferEncoding: []string{"chunked"},
+			Trailer:          Header{"X-Trailer": {"ok", "evil\r\nInjected: 1"}},
+		},
+
+		Body: []byte("abcdef"),
+
+		WantError: errors.New(`github.com/josexy/xhttp: invalid trailer field value for "X-Trailer"`),
 	},
 }
 
@@ -911,7 +1026,7 @@ func TestRequestWriteError(t *testing.T) {
 	}
 }
 
-// dumpRequestOut is a modified copy of net/http/httputil.DumpRequestOut.
+// dumpRequestOut is a modified copy of github.com/josexy/xhttp/httputil.DumpRequestOut.
 // Unlike the original, this version doesn't mutate the req.Body and
 // try to restore it. It always dumps the whole body.
 // And it doesn't support https.

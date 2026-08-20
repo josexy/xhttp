@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/textproto"
 	"net/url"
 	"strconv"
@@ -61,7 +62,10 @@ type Response struct {
 	// a zero-length body. It is the caller's responsibility to
 	// close Body. The default HTTP client's Transport may not
 	// reuse HTTP/1.x "keep-alive" TCP connections if the Body is
-	// not read to completion and closed.
+	// not read to completion and closed; however, manually reading
+	// the body to completion should not be needed in most cases,
+	// as closing the body will also cause the body to be read to
+	// completion asynchronously, up to a conservative limit.
 	//
 	// The Body is automatically dechunked if the server replied
 	// with a "chunked" Transfer-Encoding.
@@ -189,7 +193,7 @@ func ReadResponse(r *bufio.Reader, req *Request) (*Response, error) {
 	if resp.StatusCode >= 100 && resp.StatusCode <= 199 && resp.StatusCode != StatusSwitchingProtocols {
 		blockKind = HeaderBlockInformational
 	}
-	mimeHeader, initialBlock, err := readMIMEHeaderBlock(tp, blockKind, resp.StatusCode)
+	mimeHeader, initialBlock, err := readMIMEHeaderBlock(tp, blockKind, resp.StatusCode, math.MaxInt64)
 	if err != nil {
 		if err == io.EOF {
 			err = io.ErrUnexpectedEOF
@@ -203,7 +207,7 @@ func ReadResponse(r *bufio.Reader, req *Request) (*Response, error) {
 
 	fixPragmaCacheControl(resp.Header)
 
-	err = readTransfer(resp, r)
+	err = readTransfer(resp, r, math.MaxInt64)
 	if err != nil {
 		return nil, err
 	}
@@ -351,7 +355,7 @@ func (r *Response) closeBody() {
 // responses.
 // The Transport uses this method to determine whether a persistent
 // connection is done being managed from its perspective. Once we
-// return a writable response body to a user, the net/http package is
+// return a writable response body to a user, the github.com/josexy/xhttp package is
 // done managing that connection.
 func (r *Response) bodyIsWritable() bool {
 	_, ok := r.Body.(io.Writer)

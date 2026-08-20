@@ -196,7 +196,7 @@ func responseHeaderBlockStore(resp *Response) *headerBlockStore {
 
 // readMIMEHeaderBlock follows textproto.Reader.ReadMIMEHeader's validation
 // and map semantics while retaining each logical field line in receive order.
-func readMIMEHeaderBlock(tp *textproto.Reader, kind HeaderBlockKind, statusCode int) (textproto.MIMEHeader, HeaderBlock, error) {
+func readMIMEHeaderBlock(tp *textproto.Reader, kind HeaderBlockKind, statusCode int, maxHeaders int64) (textproto.MIMEHeader, HeaderBlock, error) {
 	header := make(textproto.MIMEHeader)
 	block := HeaderBlock{Kind: kind, ProtoMajor: 1, StatusCode: statusCode}
 
@@ -230,6 +230,10 @@ func readMIMEHeaderBlock(tp *textproto.Reader, kind HeaderBlockKind, statusCode 
 		canonicalName := textproto.CanonicalMIMEHeaderKey(name)
 		header[canonicalName] = append(header[canonicalName], value)
 		block.Fields = append(block.Fields, HeaderField{Name: name, Value: value})
+		maxHeaders--
+		if maxHeaders < 0 {
+			return header, block, errors.New("message too large")
+		}
 		if err != nil {
 			if err == io.EOF {
 				return header, block, err
