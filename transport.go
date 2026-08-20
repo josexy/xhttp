@@ -2079,7 +2079,7 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod, isClientConn
 
 	if http2 && t.h2Transport != nil {
 		if isClientConn {
-			cc, err := t.http2NewClientConn(pconn.conn, internalStateHook)
+			cc, err := t.http2NewClientConn(ctx, pconn.conn, internalStateHook)
 			if err == nil {
 				return &persistConn{t: t, cacheKey: pconn.cacheKey, alt: cc, isClientConn: true}, nil
 			}

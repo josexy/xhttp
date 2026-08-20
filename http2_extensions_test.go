@@ -8,6 +8,7 @@ package http_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"reflect"
@@ -224,6 +225,85 @@ func TestHTTP2FingerprintTransportReplayAndPooling(t *testing.T) {
 	}
 	if got, want := dials.Load(), int32(2); got != want {
 		t.Fatalf("dial count = %d; want %d", got, want)
+	}
+}
+
+func TestHTTP2NewClientConnFingerprint(t *testing.T) {
+	type observation struct {
+		fingerprint http.Fingerprint
+		ok          bool
+	}
+	observed := make(chan observation, 1)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fingerprint, ok := http.RequestFingerprint(r)
+		observed <- observation{fingerprint: fingerprint, ok: ok}
+		if !ok {
+			http.Error(w, "missing HTTP/2 fingerprint", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+
+	transport := server.Client().Transport.(*http.Transport).Clone()
+	transport.DisableCompression = true
+	defer transport.CloseIdleConnections()
+
+	fingerprint := http.Fingerprint{
+		Settings: []http.Setting{
+			{ID: http.SettingHeaderTableSize, Val: 65536},
+			{ID: http.SettingMaxConcurrentStreams, Val: 1000},
+			{ID: http.SettingInitialWindowSize, Val: 6291456},
+			{ID: http.SettingMaxHeaderListSize, Val: 262144},
+		},
+		WindowUpdate:      15663105,
+		Priorities:        []http.FingerprintPriority{{StreamID: 3, StreamDep: 0, Weight: 201}},
+		HeaderPriority:    &http.FingerprintHeaderPriority{StreamDep: 0, Exclusive: true, Weight: 101},
+		PseudoHeaderOrder: []string{":method", ":authority", ":scheme", ":path"},
+	}
+	req, err := http.NewRequest(http.MethodGet, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err = http.WithRequestFingerprint(req, fingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conn, err := transport.NewClientConn(req.Context(), "https", server.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	resp, err := conn.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	got := <-observed
+	if !got.ok {
+		t.Fatal("server did not observe an HTTP/2 fingerprint")
+	}
+	if !reflect.DeepEqual(got.fingerprint, fingerprint) {
+		t.Fatalf("server fingerprint = %#v; want %#v", got.fingerprint, fingerprint)
+	}
+
+	different := fingerprint
+	different.Settings = append([]http.Setting(nil), fingerprint.Settings...)
+	different.Settings[0].Val = 32768
+	req, err = http.NewRequest(http.MethodGet, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err = http.WithRequestFingerprint(req, different)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.RoundTrip(req); !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("RoundTrip with different connection fingerprint error = %v; want errors.ErrUnsupported", err)
 	}
 }
 

@@ -31,7 +31,7 @@ func (t *Transport) http2AddConn(ctx context.Context, scheme, authority string, 
 func (t *Transport) http2ExternalDial(ctx context.Context, cm connectMethod) (RoundTripper, error) {
 	return nil, errors.ErrUnsupported
 }
-func (t *Transport) http2NewClientConn(nc net.Conn, internalStateHook func()) (RoundTripper, error) {
+func (t *Transport) http2NewClientConn(ctx context.Context, nc net.Conn, internalStateHook func()) (RoundTripper, error) {
 	return nil, errors.ErrUnsupported
 }
 func (t *Transport) http2NewClientConnFromContext(ctx context.Context) (*ClientConn, error) {

@@ -377,11 +377,11 @@ func (t *Transport) http2AddConn(ctx context.Context, scheme, authority string, 
 
 // http2NewClientConn creates an HTTP/2 genericClientConn (used to implement ClientConn) from nc.
 // The connection is not added to the HTTP/2 connection pool.
-func (t *Transport) http2NewClientConn(nc net.Conn, internalStateHook func()) (genericClientConn, error) {
+func (t *Transport) http2NewClientConn(ctx context.Context, nc net.Conn, internalStateHook func()) (genericClientConn, error) {
 	if t.h2Transport == nil {
 		return nil, errors.ErrUnsupported
 	}
-	cc, err := t.h2Transport.NewClientConn(nc, internalStateHook)
+	cc, err := t.h2Transport.NewClientConnWithContext(ctx, nc, internalStateHook)
 	if err != nil {
 		return nil, err
 	}
@@ -413,7 +413,7 @@ func (t *Transport) http2NewClientConnFromContext(ctx context.Context) (*ClientC
 		return nil, errors.New("http: Transport does not support HTTP/2")
 	}
 	cc := &ClientConn{}
-	gc, err := t.http2NewClientConn(nc, cc.maybeRunStateHook)
+	gc, err := t.http2NewClientConn(ctx, nc, cc.maybeRunStateHook)
 	if err != nil {
 		return nil, err
 	}

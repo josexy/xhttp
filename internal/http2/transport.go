@@ -619,7 +619,21 @@ func (t *Transport) expectContinueTimeout() time.Duration {
 }
 
 func (t *Transport) NewClientConn(c net.Conn, internalStateHook func()) (NetHTTPClientConn, error) {
-	cc, err := t.newClientConn(c, t.disableKeepAlives(), internalStateHook)
+	return t.newNetHTTPClientConn(c, internalStateHook, nil)
+}
+
+// NewClientConnWithContext creates a client connection using any HTTP/2
+// fingerprint attached to ctx.
+func (t *Transport) NewClientConnWithContext(ctx context.Context, c net.Conn, internalStateHook func()) (NetHTTPClientConn, error) {
+	var fingerprint *Fingerprint
+	if config, ok := fingerprintWriteConfigFromContext(ctx); ok {
+		fingerprint = &config.fingerprint
+	}
+	return t.newNetHTTPClientConn(c, internalStateHook, fingerprint)
+}
+
+func (t *Transport) newNetHTTPClientConn(c net.Conn, internalStateHook func(), fingerprint *Fingerprint) (NetHTTPClientConn, error) {
+	cc, err := t.newClientConnWithFingerprint(c, t.disableKeepAlives(), internalStateHook, fingerprint)
 	if err != nil {
 		return NetHTTPClientConn{}, err
 	}
