@@ -611,7 +611,14 @@ func (t *Transport) dialClientConnWithFingerprint(ctx context.Context, addr stri
 	if err != nil {
 		return nil, err
 	}
-	return t.newClientConnWithFingerprint(tconn, singleUse, nil, fingerprint)
+	cc, err := t.newClientConnWithFingerprint(tconn, singleUse, nil, fingerprint)
+	if err != nil {
+		// Ownership has not transferred to ClientConn when construction fails.
+		// Keep the dial path responsible for releasing the TLS connection.
+		_ = tconn.Close()
+		return nil, err
+	}
+	return cc, nil
 }
 
 func (t *Transport) newTLSConfig(host string) *tls.Config {
@@ -632,9 +639,11 @@ func (t *Transport) dialTLS(ctx context.Context, network, addr string, tlsCfg *t
 	}
 	state := tlsCn.ConnectionState()
 	if p := state.NegotiatedProtocol; p != NextProtoTLS {
+		_ = tlsCn.Close()
 		return nil, fmt.Errorf("http2: unexpected ALPN protocol %q; want %q", p, NextProtoTLS)
 	}
 	if !state.NegotiatedProtocolIsMutual {
+		_ = tlsCn.Close()
 		return nil, errors.New("http2: could not negotiate protocol mutually")
 	}
 	return tlsCn, nil
