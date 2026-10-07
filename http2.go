@@ -164,6 +164,8 @@ var (
 	_ io.StringWriter = http2ResponseWriter{}
 )
 
+func (w http2ResponseWriter) FinishResponse() error { return w.ResponseWriter.FinishResponse() }
+
 func (w http2ResponseWriter) Flush()            { w.ResponseWriter.FlushError() }
 func (w http2ResponseWriter) FlushError() error { return w.ResponseWriter.FlushError() }
 

@@ -730,6 +730,12 @@ func (sc *serverConn) writeFrameAsync(wr FrameWriteRequest, wd *writeData) {
 	} else {
 		err = sc.framer.endWrite()
 	}
+	// A terminal frame is only complete once buffered bytes reach the
+	// connection. This lets FinishResponse observe failures of END_STREAM
+	// and trailers, rather than merely scheduler/buffer acceptance.
+	if err == nil && writeEndsStream(wr.write) {
+		err = sc.Flush()
+	}
 	sc.wroteFrameCh <- frameWriteResult{wr: wr, err: err}
 }
 
@@ -1171,7 +1177,7 @@ func (sc *serverConn) startFrameWrite(wr FrameWriteRequest) {
 
 	sc.writingFrame = true
 	sc.needsFrameFlush = true
-	if wr.write.staysWithinBuffer(sc.bw.Available()) {
+	if !writeEndsStream(wr.write) && wr.write.staysWithinBuffer(sc.bw.Available()) {
 		sc.writingFrameAsync = false
 		err := wr.write.writeFrame(sc)
 		sc.wroteFrame(frameWriteResult{wr: wr, err: err})
@@ -1208,12 +1214,13 @@ func (sc *serverConn) wroteFrame(res frameWriteResult) {
 	}
 
 	wr := res.wr
-
 	if writeEndsStream(wr.write) {
 		st := wr.stream
 		if st == nil {
 			panic("internal error: expecting non-nil stream")
 		}
+		// Reply before closeStream, and never access the pooled frame afterward.
+		wr.replyToWriter(res.err)
 		switch st.state {
 		case stateOpen:
 			// Here we would go to stateHalfClosedLocal in
@@ -1245,10 +1252,8 @@ func (sc *serverConn) wroteFrame(res frameWriteResult) {
 		case handlerPanicRST:
 			sc.closeStream(wr.stream, errHandlerPanicked)
 		}
+		wr.replyToWriter(res.err)
 	}
-
-	// Reply (if requested) to unblock the ServeHTTP goroutine.
-	wr.replyToWriter(res.err)
 
 	sc.scheduleFrameWrite()
 }
@@ -2366,7 +2371,7 @@ func handleHeaderListTooLong(w *ResponseWriter, r *ServerRequest) {
 func (sc *serverConn) writeHeaders(st *stream, headerData *writeResHeaders) error {
 	sc.serveG.checkNotOn() // NOT on
 	var errc chan error
-	if headerData.h != nil {
+	if headerData.h != nil || headerData.endStream {
 		// If there's a header map (which we don't own), so we have to block on
 		// waiting for this frame to be written, so an http.Flush mid-handler
 		// writes out the correct value of keys, before a handler later potentially
@@ -2388,7 +2393,13 @@ func (sc *serverConn) writeHeaders(st *stream, headerData *writeResHeaders) erro
 		case <-sc.doneServing:
 			return errClientDisconnected
 		case <-st.cw:
-			return errStreamClosed
+			select {
+			case err := <-errc:
+				sc.srv.putErrChan(errc)
+				return err
+			default:
+				return errStreamClosed
+			}
 		}
 	}
 	return nil
@@ -2508,6 +2519,8 @@ type responseWriter struct {
 }
 
 type responseWriterState struct {
+	responseFinished bool
+	finishErr        error
 	// immutable within a request:
 	stream *stream
 	req    ServerRequest
@@ -3066,6 +3079,9 @@ func (w *responseWriter) write(lenData int, dataB []byte, dataS string) (n int, 
 	if rws == nil {
 		panic("Write called after Handler finished")
 	}
+	if rws.responseFinished {
+		return 0, errors.New("http2: write after FinishResponse")
+	}
 	if !rws.wroteHeader {
 		w.WriteHeader(200)
 	}
@@ -3085,10 +3101,28 @@ func (w *responseWriter) write(lenData int, dataB []byte, dataS string) (n int, 
 	}
 }
 
+// FinishResponse writes the terminal frame while the handler still owns its
+// context, before runHandler performs unconditional cancellation and recycling.
+func (w *responseWriter) FinishResponse() error {
+	rws := w.rws
+	if rws == nil {
+		return errors.New("http2: response writer is no longer available")
+	}
+	if rws.responseFinished {
+		return rws.finishErr
+	}
+	rws.handlerDone = true
+	rws.finishErr = w.FlushError()
+	if rws.streamEnded && errors.Is(rws.finishErr, errHandlerComplete) {
+		rws.finishErr = nil
+	}
+	rws.responseFinished = true
+	return rws.finishErr
+}
+
 func (w *responseWriter) handlerDone() {
 	rws := w.rws
-	rws.handlerDone = true
-	w.Flush()
+	_ = w.FinishResponse()
 	w.rws = nil
 	responseWriterStatePool.Put(rws)
 }
