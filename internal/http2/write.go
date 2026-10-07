@@ -201,10 +201,14 @@ type writeResHeaders struct {
 }
 
 func encKV(enc *hpack.Encoder, k, v string) {
+	encField(enc, hpack.HeaderField{Name: k, Value: v})
+}
+
+func encField(enc *hpack.Encoder, field hpack.HeaderField) {
 	if VerboseLogs {
-		log.Printf("http2: server encoding header %q = %q", k, v)
+		log.Printf("http2: server encoding header %q = %q", field.Name, field.Value)
 	}
-	enc.WriteField(hpack.HeaderField{Name: k, Value: v})
+	enc.WriteField(field)
 }
 
 func (w *writeResHeaders) staysWithinBuffer(max int) bool {
@@ -224,10 +228,7 @@ func (w *writeResHeaders) writeFrame(ctx writeContext) error {
 
 	if w.exactFields != nil {
 		for _, field := range w.exactFields {
-			if VerboseLogs {
-				log.Printf("http2: server encoding exact header %q = %q", field.Name, field.Value)
-			}
-			enc.WriteField(field)
+			encField(enc, field)
 		}
 	} else if len(w.headerOrder) == 0 {
 		if w.httpResCode != 0 {
@@ -261,7 +262,7 @@ func (w *writeResHeaders) writeFrame(ctx writeContext) error {
 			fields = append(fields, hpack.HeaderField{Name: "date", Value: w.date})
 		}
 		for _, hf := range httpcommon.OrderHeaderFields(fields, w.headerOrder) {
-			encKV(enc, hf.Name, hf.Value)
+			encField(enc, hf)
 		}
 	}
 

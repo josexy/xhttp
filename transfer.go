@@ -313,61 +313,24 @@ func (t *transferWriter) shouldSendContentLength() bool {
 }
 
 func (t *transferWriter) writeHeader(w io.Writer, trace *httptrace.ClientTrace) error {
-	if t.Close && !hasToken(t.Header.get("Connection"), "close") {
-		if _, err := io.WriteString(w, "Connection: close\r\n"); err != nil {
-			return err
-		}
-		if trace != nil && trace.WroteHeaderField != nil {
-			trace.WroteHeaderField("Connection", []string{"close"})
-		}
+	fields, err := t.headerFields()
+	if err != nil {
+		return err
 	}
-
-	// Write Content-Length and/or Transfer-Encoding whose values are a
-	// function of the sanitized field triple (Body, ContentLength,
-	// TransferEncoding)
-	if t.shouldSendContentLength() {
-		if _, err := io.WriteString(w, "Content-Length: "); err != nil {
-			return err
-		}
-		if _, err := io.WriteString(w, strconv.FormatInt(t.ContentLength, 10)+"\r\n"); err != nil {
-			return err
-		}
-		if trace != nil && trace.WroteHeaderField != nil {
-			trace.WroteHeaderField("Content-Length", []string{strconv.FormatInt(t.ContentLength, 10)})
-		}
-	} else if chunked(t.TransferEncoding) {
-		if _, err := io.WriteString(w, "Transfer-Encoding: chunked\r\n"); err != nil {
-			return err
-		}
-		if trace != nil && trace.WroteHeaderField != nil {
-			trace.WroteHeaderField("Transfer-Encoding", []string{"chunked"})
-		}
+	if trace == nil || trace.WroteHeaderField == nil {
+		return writeHTTP1Fields(w, fields, nil)
 	}
-
-	// Write Trailer header
-	if t.Trailer != nil {
-		keys := make([]string, 0, len(t.Trailer))
-		for k := range t.Trailer {
-			k = CanonicalHeaderKey(k)
-			switch k {
-			case "Transfer-Encoding", "Trailer", "Content-Length":
-				return badStringError("invalid Trailer key", k)
-			}
-			keys = append(keys, k)
+	for _, field := range fields {
+		if err := writeHTTP1Fields(w, []HeaderField{field}, nil); err != nil {
+			return err
 		}
-		if len(keys) > 0 {
-			slices.Sort(keys)
-			// TODO: could do better allocation-wise here, but trailers are rare,
-			// so being lazy for now.
-			if _, err := io.WriteString(w, "Trailer: "+strings.Join(keys, ",")+"\r\n"); err != nil {
-				return err
-			}
-			if trace != nil && trace.WroteHeaderField != nil {
-				trace.WroteHeaderField("Trailer", keys)
-			}
+		values := []string{field.Value}
+		if field.Name == "Trailer" {
+			// Keep the legacy trace's separate trailer declaration names.
+			values = strings.Split(field.Value, ",")
 		}
+		trace.WroteHeaderField(field.Name, values)
 	}
-
 	return nil
 }
 

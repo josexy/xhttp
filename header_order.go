@@ -24,6 +24,9 @@ import (
 // Field-name matching is case-insensitive. Missing names are ignored, repeated
 // values remain grouped, and unlisted fields follow listed fields in lowercase
 // lexical order. A non-empty slice enables ordering for that block type.
+// Values and automatic protocol fields still come from normal serialization.
+// Use WithRequestHeaderBlocks or WriteResponseHeaderBlock when the complete
+// field sequence, including interleaved duplicates, must be supplied explicitly.
 type HeaderOrder struct {
 	Headers  []string
 	Trailers []string
@@ -98,7 +101,7 @@ func headerFieldsFromHeader(h Header, exclude map[string]bool) []HeaderField {
 	return fields
 }
 
-func writeHTTP1HeaderFields(w io.Writer, fields []HeaderField, order []string, trace *httptrace.ClientTrace) error {
+func orderHTTP1HeaderFields(fields []HeaderField, order []string) []HeaderField {
 	type fieldGroup struct {
 		lower  string
 		fields []HeaderField
@@ -140,30 +143,34 @@ func writeHTTP1HeaderFields(w io.Writer, fields []HeaderField, order []string, t
 		}
 	})
 
-	ws, ok := w.(io.StringWriter)
-	if !ok {
-		ws = stringWriter{w}
-	}
+	ordered := make([]HeaderField, 0, len(fields))
 	for _, group := range groups {
-		for start := 0; start < len(group.fields); {
-			name := group.fields[start].Name
-			values := make([]string, 0, len(group.fields)-start)
-			end := start
-			for end < len(group.fields) && group.fields[end].Name == name {
-				field := group.fields[end]
-				for _, part := range []string{field.Name, ": ", field.Value, "\r\n"} {
-					if _, err := ws.WriteString(part); err != nil {
-						return err
-					}
-				}
-				values = append(values, field.Value)
-				end++
-			}
-			if trace != nil && trace.WroteHeaderField != nil {
-				trace.WroteHeaderField(name, values)
-			}
-			start = end
+		ordered = append(ordered, group.fields...)
+	}
+	return ordered
+}
+
+func writeHTTP1HeaderFields(w io.Writer, fields []HeaderField, order []string, trace *httptrace.ClientTrace) error {
+	fields = orderHTTP1HeaderFields(fields, order)
+	if trace == nil || trace.WroteHeaderField == nil {
+		return writeHTTP1Fields(w, fields, nil)
+	}
+	// HeaderOrder traces same-spelling values as a group, while exact blocks
+	// trace each occurrence. Both use the same field-line serializer.
+	for start := 0; start < len(fields); {
+		end := start + 1
+		for end < len(fields) && fields[end].Name == fields[start].Name {
+			end++
 		}
+		if err := writeHTTP1Fields(w, fields[start:end], nil); err != nil {
+			return err
+		}
+		values := make([]string, end-start)
+		for i, field := range fields[start:end] {
+			values[i] = field.Value
+		}
+		trace.WroteHeaderField(fields[start].Name, values)
+		start = end
 	}
 	return nil
 }
