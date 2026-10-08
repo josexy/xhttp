@@ -777,3 +777,101 @@ type http1UnwrapWriter struct{ ResponseWriter }
 func (w http1UnwrapWriter) Unwrap() ResponseWriter { return w.ResponseWriter }
 
 func asciiEqualFoldForTest(a, b string) bool { return strings.EqualFold(a, b) }
+
+func TestHTTP1HeaderModesPreserveTraceSemantics(t *testing.T) {
+	for _, mode := range []string{"default", "name order", "exact block"} {
+		t.Run(mode, func(t *testing.T) {
+			var traced [][]string
+			trace := &httptrace.ClientTrace{WroteHeaderField: func(name string, values []string) {
+				if name == "X-Test" {
+					traced = append(traced, append([]string(nil), values...))
+				}
+			}}
+			req, err := NewRequestWithContext(httptrace.WithClientTrace(t.Context(), trace), "POST", "http://example.test/", strings.NewReader("abc"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header["X-Test"] = []string{"first", ""}
+			req.Header["User-Agent"] = nil
+			wantTrace := [][]string{{"first", ""}}
+			switch mode {
+			case "name order":
+				req, err = WithRequestHeaderOrder(req, HeaderOrder{Headers: []string{"host", "content-length", "x-test"}})
+			case "exact block":
+				req, err = WithRequestHeaderBlocks(req, HeaderBlock{Kind: HeaderBlockInitial, ProtoMajor: 1, Fields: []HeaderField{
+					{Name: "Host", Value: "example.test"},
+					{Name: "Content-Length", Value: "3"},
+					{Name: "X-Test", Value: "first"},
+					{Name: "X-Test", Value: ""},
+				}}, nil)
+				wantTrace = [][]string{{"first"}, {""}}
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var wire strings.Builder
+			if err := req.Write(&wire); err != nil {
+				t.Fatal(err)
+			}
+			const want = "POST / HTTP/1.1\r\nHost: example.test\r\nContent-Length: 3\r\nX-Test: first\r\nX-Test: \r\n\r\nabc"
+			if wire.String() != want {
+				t.Fatalf("wire = %q; want %q", wire.String(), want)
+			}
+			if !reflect.DeepEqual(traced, wantTrace) {
+				t.Fatalf("trace = %#v; want %#v", traced, wantTrace)
+			}
+		})
+	}
+}
+
+type headerModeEOFReader func()
+
+func (f headerModeEOFReader) Read([]byte) (int, error) {
+	f()
+	return 0, io.EOF
+}
+
+func TestHTTP1HeaderModesWithLateOrderedTrailers(t *testing.T) {
+	for _, exact := range []bool{false, true} {
+		name := "generated initial fields"
+		if exact {
+			name = "exact initial fields"
+		}
+		t.Run(name, func(t *testing.T) {
+			trailers := Header{"X-A": nil, "x-Z": nil}
+			body := io.NopCloser(io.MultiReader(strings.NewReader("abc"), headerModeEOFReader(func() {
+				trailers["X-A"] = []string{"a"}
+				trailers["x-Z"] = []string{"z", ""}
+			})))
+			req, err := NewRequest("POST", "http://example.test/", body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Trailer = trailers
+			req.ContentLength = -1
+			req.TransferEncoding = []string{"chunked"}
+			req, err = WithRequestHeaderOrder(req, HeaderOrder{Trailers: []string{"x-z", "x-a"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if exact {
+				req, err = WithRequestHeaderBlocks(req, HeaderBlock{Kind: HeaderBlockInitial, ProtoMajor: 1, Fields: []HeaderField{
+					{Name: "Host", Value: "example.test"},
+					{Name: "Transfer-Encoding", Value: "chunked"},
+					{Name: "Trailer", Value: "X-A,X-Z"},
+				}}, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			var wire strings.Builder
+			if err := req.Write(&wire); err != nil {
+				t.Fatal(err)
+			}
+			const suffix = "\r\n\r\n3\r\nabc\r\n0\r\nx-Z: z\r\nx-Z: \r\nX-A: a\r\n\r\n"
+			if !strings.HasSuffix(wire.String(), suffix) {
+				t.Fatalf("late trailers or body changed: %q", wire.String())
+			}
+		})
+	}
+}

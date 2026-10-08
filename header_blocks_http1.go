@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net/textproto"
-	"strings"
 
 	"github.com/josexy/xhttp/httptrace"
 	"github.com/josexy/xhttp/internal"
@@ -188,24 +187,6 @@ func requestWantsClose(req *Request) bool {
 	return req.wantsClose()
 }
 
-func writeExactHTTP1Fields(w io.Writer, fields []HeaderField, trace *httptrace.ClientTrace) error {
-	ws, ok := w.(io.StringWriter)
-	if !ok {
-		ws = stringWriter{w}
-	}
-	for _, field := range fields {
-		for _, part := range []string{field.Name, ": ", field.Value, "\r\n"} {
-			if _, err := ws.WriteString(part); err != nil {
-				return err
-			}
-		}
-		if trace != nil && trace.WroteHeaderField != nil {
-			trace.WroteHeaderField(field.Name, []string{field.Value})
-		}
-	}
-	return nil
-}
-
 func (r *Request) writeExactHTTP1(w io.Writer, ruri string, config requestHeaderBlocksWriteConfig, waitForContinue func() bool, trace *httptrace.ClientTrace) error {
 	plan, err := prepareHTTP1ExactRequest(r, config)
 	if err != nil {
@@ -219,7 +200,7 @@ func (r *Request) writeExactHTTP1(w io.Writer, ruri string, config requestHeader
 	if _, err := fmt.Fprintf(w, "%s %s HTTP/1.1\r\n", valueOrDefault(r.Method, "GET"), ruri); err != nil {
 		return err
 	}
-	if err := writeExactHTTP1Fields(w, plan.block.Fields, trace); err != nil {
+	if err := writeHTTP1Fields(w, plan.block.Fields, trace); err != nil {
 		return err
 	}
 	if _, err := io.WriteString(w, "\r\n"); err != nil {
@@ -275,7 +256,7 @@ func (r *Request) writeExactHTTP1(w io.Writer, ruri string, config requestHeader
 		if err != nil {
 			return err
 		}
-		if err := writeExactHTTP1Fields(w, trailerFields, nil); err != nil {
+		if err := writeHTTP1Fields(w, trailerFields, nil); err != nil {
 			return err
 		}
 		if _, err := io.WriteString(w, "\r\n"); err != nil {
@@ -347,21 +328,4 @@ func exactRequestTrailerFields(req *Request, config requestHeaderBlocksWriteConf
 		return orderHTTP1HeaderFields(fields, order), nil
 	}
 	return fields, nil
-}
-
-func orderHTTP1HeaderFields(fields []HeaderField, order []string) []HeaderField {
-	var b strings.Builder
-	// Reuse the production ordering routine without duplicating its grouping
-	// rules, then parse its already-validated logical lines back into fields.
-	if writeHTTP1HeaderFields(&b, fields, order, nil) != nil {
-		return fields
-	}
-	ordered := make([]HeaderField, 0, len(fields))
-	for line := range strings.SplitSeq(strings.TrimSuffix(b.String(), "\r\n"), "\r\n") {
-		name, value, ok := strings.Cut(line, ": ")
-		if ok {
-			ordered = append(ordered, HeaderField{Name: name, Value: value})
-		}
-	}
-	return ordered
 }

@@ -179,7 +179,7 @@ func (w *response) writeHTTP1HeaderBlock(block HeaderBlock) error {
 			w.disableWriteContinue(false)
 		}
 		writeStatusLine(w.conn.bufw, w.req.ProtoAtLeast(1, 1), block.StatusCode, w.statusBuf[:])
-		if err := writeExactHTTP1Fields(w.conn.bufw, block.Fields, nil); err != nil {
+		if err := writeHTTP1Fields(w.conn.bufw, block.Fields, nil); err != nil {
 			return err
 		}
 		if _, err := w.conn.bufw.Write(crlf); err != nil {

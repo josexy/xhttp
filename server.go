@@ -415,13 +415,13 @@ func (cw *chunkWriter) close() {
 		// zero chunk to mark EOF
 		bw.WriteString("0\r\n")
 		if block := cw.res.exactTrailerBlock; block != nil {
-			writeExactHTTP1Fields(bw, block.Fields, nil)
+			writeHTTP1Fields(bw, block.Fields, nil)
 		} else if cw.res.exactHeaderBlock != nil {
 			fields := cw.res.exactFallbackTrailerFields()
 			if len(cw.res.headerOrder.Trailers) > 0 {
 				fields = orderHTTP1HeaderFields(fields, cw.res.headerOrder.Trailers)
 			}
-			writeExactHTTP1Fields(bw, fields, nil)
+			writeHTTP1Fields(bw, fields, nil)
 		} else if trailers := cw.res.finalTrailers(); trailers != nil {
 			if len(cw.res.headerOrder.Trailers) > 0 {
 				writeHTTP1HeaderFields(bw, headerFieldsFromHeader(trailers, nil), cw.res.headerOrder.Trailers, nil)
@@ -1356,7 +1356,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 	if w.exactHeaderBlock != nil {
 		w.prepareRequestBodyForExactResponse()
 		writeStatusLine(w.conn.bufw, w.req.ProtoAtLeast(1, 1), w.status, w.statusBuf[:])
-		writeExactHTTP1Fields(w.conn.bufw, w.exactHeaderBlock.Fields, nil)
+		writeHTTP1Fields(w.conn.bufw, w.exactHeaderBlock.Fields, nil)
 		w.conn.bufw.Write(crlf)
 		return
 	}
