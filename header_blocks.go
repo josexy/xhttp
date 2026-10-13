@@ -307,11 +307,12 @@ func readContinuedMIMEHeaderLine(tp *textproto.Reader) ([]byte, error) {
 			break
 		}
 		continuation, readErr := tp.ReadLineBytes()
+		if readErr != nil {
+			// A failed continuation must not turn a partial field into a valid header.
+			return nil, readErr
+		}
 		logical = append(logical, ' ')
 		logical = append(logical, bytes.Trim(continuation, " \t")...)
-		if readErr != nil {
-			break
-		}
 	}
 	return logical, nil
 }

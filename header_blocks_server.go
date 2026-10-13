@@ -134,12 +134,19 @@ func prepareHTTP1ExactResponse(w *response, block HeaderBlock) (http1ExactRespon
 	if len(plan.trailerNames) > 0 && !plan.chunked {
 		return plan, errors.New("http: exact response trailers require Transfer-Encoding: chunked")
 	}
-	bodyAllowed := bodyAllowedForStatus(block.StatusCode) && w.req.Method != "HEAD"
+	// Use the received method even if middleware rewrote the request. A 2xx
+	// CONNECT switches to tunnel framing, which forbids HTTP body framing fields.
+	if w.conn.lastMethod == "CONNECT" && block.StatusCode >= 200 && block.StatusCode < 300 {
+		if plan.hasContentLength || plan.chunked || trailerFieldCount != 0 {
+			return plan, errors.New("http: successful CONNECT response cannot contain framing fields")
+		}
+	}
+	bodyAllowed := bodyAllowedForStatus(block.StatusCode) && w.conn.lastMethod != "HEAD"
 	if !bodyAllowed {
 		if plan.chunked {
 			return plan, fmt.Errorf("http: exact response status %d cannot use chunked framing", block.StatusCode)
 		}
-		if plan.hasContentLength && w.req.Method != "HEAD" && block.StatusCode != StatusNotModified &&
+		if plan.hasContentLength && w.conn.lastMethod != "HEAD" && block.StatusCode != StatusNotModified &&
 			(block.StatusCode == StatusNoContent || block.StatusCode >= 100 && block.StatusCode <= 199 || plan.contentLength != 0) {
 			return plan, fmt.Errorf("http: exact response status %d cannot use the supplied Content-Length", block.StatusCode)
 		}
@@ -156,6 +163,13 @@ func prepareHTTP1ExactResponse(w *response, block HeaderBlock) (http1ExactRespon
 			(plan.hasContentLength || !bodyAllowed) {
 			plan.close = false
 		}
+	}
+	// CONNECT connections cannot be reused for HTTP, including after rejection.
+	if w.conn.lastMethod == "CONNECT" {
+		if exactHeaderHasToken(block, "connection", "keep-alive") {
+			return plan, errors.New("http: CONNECT response conflicts with Connection: keep-alive")
+		}
+		plan.close = true
 	}
 	return plan, nil
 }
