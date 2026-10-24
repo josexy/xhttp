@@ -4,17 +4,20 @@ A fork of Go's `net/http` with HTTP/1 and HTTP/2 wire header metadata,
 header ordering, exact header blocks, HTTP/2 fingerprints, retry hooks,
 and response completion support.
 
-Requires Go 1.27.2 or later. Import `github.com/josexy/xhttp` instead of
+Requires Go 1.27.3 or later. Import `github.com/josexy/xhttp` instead of
 `net/http`; the two packages' HTTP types are not interchangeable.
 
 ## Upstream baseline
 
 The HTTP implementation and its internal HTTP/2 package are synchronized with
-[Go 1.27.2](https://github.com/golang/go/tree/go1.27.2/src/net/http), including
+[Go 1.27.3](https://github.com/golang/go/tree/go1.27.3/src/net/http), including
 the fixes since Go 1.27.0 and their regression tests. Fork-specific extensions
 are retained. HPACK and HTTP utility packages still come from `golang.org/x/net`.
 
-This update includes:
+Go 1.27.3 updates `crypto/x509` in the Go toolchain; the upstream HTTP source
+is unchanged from Go 1.27.2.
+
+The synchronized baseline includes:
 
 - HTTP/2 flow control accounting, deferred HPACK encoder settings updates,
   and unread request body credit recovery.
