@@ -162,7 +162,8 @@ func RequestHeaderBlocks(ctx context.Context) []HeaderBlock {
 
 // WithRequestHeaderOrder returns a shallow copy of req whose HTTP/2 initial
 // headers and trailers are written in order. Header values continue to come
-// from req.Header and req.Trailer.
+// from req.Header and req.Trailer. Each call replaces any previous order; an
+// empty HeaderOrder clears it.
 //
 // The returned request is supported by the legacy implementation in this
 // package (Go 1.26 and earlier, or builds using the http2legacy tag).
@@ -186,10 +187,18 @@ func WithRequestHeaderOrder(ctx context.Context, order HeaderOrder) (context.Con
 			return nil, err
 		}
 	}
-	if len(order.Headers) == 0 && len(order.Trailers) == 0 {
-		return ctx, nil
-	}
+	// Store an empty order too, so it shadows (clears) an earlier one.
 	return context.WithValue(ctx, requestHeaderOrderContextKey{}, order), nil
+}
+
+// RequestHeaderBlocksConfigured reports whether ctx carries an exact HTTP/2
+// initial header block and an exact trailer block provider.
+func RequestHeaderBlocksConfigured(ctx context.Context) (initial, trailers bool) {
+	if ctx == nil {
+		return false, false
+	}
+	config := requestHeaderBlocksToWrite(ctx)
+	return config.initial != nil, config.trailers != nil
 }
 
 // WithRequestHeaderBlocks returns a shallow copy of req whose HTTP/2 initial
@@ -491,5 +500,23 @@ func contextWithRequestHeaderBlocks(ctx context.Context, s *headerBlockStore) co
 
 // ClearRequestHeaderBlocks removes exact HTTP/2 block replay metadata from ctx.
 func ClearRequestHeaderBlocks(ctx context.Context) context.Context {
+	ctx = context.WithValue(ctx, requestHTTP1HeaderBlocksContextKey{}, false)
 	return context.WithValue(ctx, requestHeaderBlocksWriteContextKey{}, requestHeaderBlocksWriteConfig{})
+}
+
+type requestHTTP1HeaderBlocksContextKey struct{}
+
+// MarkHTTP1RequestHeaderBlocks records that ctx carries an exact HTTP/1
+// request header block. A ClientConn then refuses the request unless an exact
+// HTTP/2 block is configured too, rather than silently serializing the
+// ordinary request header.
+func MarkHTTP1RequestHeaderBlocks(ctx context.Context) context.Context {
+	return context.WithValue(ctx, requestHTTP1HeaderBlocksContextKey{}, true)
+}
+
+func checkExactRequestHeaderBlockProtocol(ctx context.Context) error {
+	if http1, _ := ctx.Value(requestHTTP1HeaderBlocksContextKey{}).(bool); http1 && requestHeaderBlocksToWrite(ctx).initial == nil {
+		return errors.New("http2: exact request header block is for HTTP/1, but the connection negotiated HTTP/2")
+	}
+	return nil
 }

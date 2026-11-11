@@ -25,6 +25,12 @@ import (
 // values remain grouped, and unlisted fields follow listed fields in lowercase
 // lexical order. A non-empty slice enables ordering for that block type.
 // Values and automatic protocol fields still come from normal serialization.
+//
+// Headers may start with HTTP/2 pseudo-headers (:authority, :method, :path,
+// :protocol and :scheme for requests, :status for responses); they must precede
+// every regular name and are ignored by HTTP/1. The same order is therefore
+// valid or invalid regardless of the negotiated protocol.
+//
 // Use WithRequestHeaderBlocks or WriteResponseHeaderBlock when the complete
 // field sequence, including interleaved duplicates, must be supplied explicitly.
 type HeaderOrder struct {
@@ -34,24 +40,32 @@ type HeaderOrder struct {
 
 type requestHeaderOrderContextKey struct{}
 
-func normalizePublicHeaderOrder(order HeaderOrder) (HeaderOrder, error) {
-	headers, err := normalizePublicHeaderNames(order.Headers)
+var (
+	requestOrderPseudoHeaders  = map[string]bool{":authority": true, ":method": true, ":path": true, ":protocol": true, ":scheme": true}
+	responseOrderPseudoHeaders = map[string]bool{":status": true}
+)
+
+func normalizePublicHeaderOrder(order HeaderOrder, pseudos map[string]bool) (HeaderOrder, error) {
+	headers, err := normalizePublicHeaderNames(order.Headers, pseudos)
 	if err != nil {
 		return HeaderOrder{}, fmt.Errorf("http: invalid header order: %w", err)
 	}
-	trailers, err := normalizePublicHeaderNames(order.Trailers)
+	trailers, err := normalizePublicHeaderNames(order.Trailers, nil)
 	if err != nil {
 		return HeaderOrder{}, fmt.Errorf("http: invalid trailer order: %w", err)
 	}
 	return HeaderOrder{Headers: headers, Trailers: trailers}, nil
 }
 
-func normalizePublicHeaderNames(names []string) ([]string, error) {
+// normalizePublicHeaderNames lowercases names and applies the HTTP/2 rules to
+// every protocol: only the allowed pseudo-headers, all before regular names.
+func normalizePublicHeaderNames(names []string, pseudos map[string]bool) ([]string, error) {
 	if len(names) == 0 {
 		return nil, nil
 	}
 	result := make([]string, len(names))
 	seen := make(map[string]bool, len(names))
+	regularSeen := false
 	for i, name := range names {
 		var ok bool
 		name, ok = ascii.ToLower(name)
@@ -62,13 +76,16 @@ func normalizePublicHeaderNames(names []string) ([]string, error) {
 			return nil, errors.New("empty field name")
 		}
 		if strings.HasPrefix(name, ":") {
-			switch name {
-			case ":authority", ":method", ":path", ":protocol", ":scheme", ":status":
-			default:
+			if !pseudos[name] {
 				return nil, fmt.Errorf("unsupported pseudo-header %q", name)
+			}
+			if regularSeen {
+				return nil, fmt.Errorf("pseudo-header %q appears after a regular field", name)
 			}
 		} else if !httpguts.ValidHeaderFieldName(name) {
 			return nil, fmt.Errorf("invalid field name %q", name)
+		} else {
+			regularSeen = true
 		}
 		if seen[name] {
 			return nil, fmt.Errorf("duplicate field name %q", name)
@@ -176,29 +193,33 @@ func writeHTTP1HeaderFields(w io.Writer, fields []HeaderField, order []string, t
 }
 
 // WithRequestHeaderOrder returns a shallow copy of req whose HTTP/1 or
-// HTTP/2 initial headers and trailers are written in order.
+// HTTP/2 initial headers and trailers are written in order. Each call replaces
+// the previous order for both blocks; an empty HeaderOrder clears it.
+//
+// The order travels in the request context. It survives redirects and
+// contexts derived from req.Context(), but Request.WithContext or
+// Request.Clone with an unrelated context drops it.
 func WithRequestHeaderOrder(req *Request, order HeaderOrder) (*Request, error) {
 	if req == nil {
 		return nil, errors.New("http: nil request")
 	}
-	order, err := normalizePublicHeaderOrder(order)
+	order, err := normalizePublicHeaderOrder(order, requestOrderPseudoHeaders)
 	if err != nil {
 		return nil, err
 	}
 	blocks := requestHeaderBlocksToWrite(req.Context())
-	if len(order.Headers) > 0 && blocks.initial != nil {
+	h2Initial, h2Trailers := http2RequestHeaderBlocksConfiguredBridge(req)
+	if len(order.Headers) > 0 && (blocks.initial != nil || h2Initial) {
 		return nil, errors.New("http: request header order conflicts with an exact initial header block")
 	}
-	if len(order.Trailers) > 0 && blocks.trailers != nil {
+	if len(order.Trailers) > 0 && (blocks.trailers != nil || h2Trailers) {
 		return nil, errors.New("http: request trailer order conflicts with an exact trailer block provider")
 	}
 	req, err = http2WithRequestHeaderOrderBridge(req, order)
 	if err != nil {
 		return nil, err
 	}
-	if len(order.Headers) == 0 && len(order.Trailers) == 0 {
-		return req, nil
-	}
+	// Store an empty order too, so it shadows (clears) an earlier one.
 	return req.WithContext(context.WithValue(req.Context(), requestHeaderOrderContextKey{}, order)), nil
 }
 
@@ -212,12 +233,13 @@ type responseWriterUnwrapper interface {
 
 // SetResponseHeaderOrder configures the order of HTTP/1 or HTTP/2 response
 // headers and trailers written by w. It must be called before the response is
-// committed. It follows wrappers implementing Unwrap.
+// committed. Each call replaces the previous order; an empty HeaderOrder
+// clears it. It follows wrappers implementing Unwrap.
 func SetResponseHeaderOrder(w ResponseWriter, order HeaderOrder) error {
 	if w == nil {
 		return errors.New("http: nil response writer")
 	}
-	order, err := normalizePublicHeaderOrder(order)
+	order, err := normalizePublicHeaderOrder(order, responseOrderPseudoHeaders)
 	if err != nil {
 		return err
 	}

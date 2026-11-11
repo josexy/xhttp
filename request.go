@@ -672,10 +672,10 @@ func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitF
 	// come from an attacker (more likely to be a constant in
 	// code).
 	if config := requestHeaderBlocksToWrite(r.Context()); config.initial != nil {
-		if config.proto != 1 {
-			return errors.New("http: exact request header block protocol does not match HTTP/1")
-		}
 		return r.writeExactHTTP1(w, ruri, config, waitForContinue, trace)
+	}
+	if err := exactRequestHTTP1Mismatch(r); err != nil {
+		return err
 	}
 
 	// Wrap the writer in a bufio Writer if it's not already buffered.

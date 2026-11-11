@@ -26,8 +26,8 @@ type http1ExactRequestPlan struct {
 }
 
 func prepareHTTP1ExactRequest(req *Request, config requestHeaderBlocksWriteConfig) (http1ExactRequestPlan, error) {
-	if config.initial == nil || config.proto != 1 {
-		return http1ExactRequestPlan{}, errors.New("http: exact request header block protocol does not match HTTP/1")
+	if config.initial == nil {
+		return http1ExactRequestPlan{}, errors.New("http: missing exact HTTP/1 request header block")
 	}
 	block := cloneHeaderBlock(*config.initial)
 	if err := validateHTTP1HeaderBlock(block, HeaderBlockInitial); err != nil {
@@ -161,9 +161,45 @@ func validateExactTrailerNameSet(fields []HeaderField, declared map[string]bool)
 	return nil
 }
 
+// checkHTTP1ExactRequest rejects req before it is written on an HTTP/1
+// connection when its exact blocks cannot be honored: only an HTTP/2 block is
+// configured, or the connection's HTTP proxy requires fields, such as
+// Proxy-Authorization, that the exact block omits. Exact blocks are never
+// extended implicitly.
+func checkHTTP1ExactRequest(req *Request, pconn *persistConn) error {
+	if err := exactRequestHTTP1Mismatch(req); err != nil {
+		return err
+	}
+	config := requestHeaderBlocksToWrite(req.Context())
+	if config.initial == nil {
+		return nil
+	}
+	pconn.mu.Lock()
+	mutate := pconn.mutateHeaderFunc
+	pconn.mu.Unlock()
+	if mutate == nil {
+		return nil
+	}
+	required := make(Header)
+	mutate(required)
+	for name := range required {
+		found := false
+		for _, field := range config.initial.Fields {
+			if ascii.EqualFold(field.Name, name) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("http: exact HTTP/1 request header block must contain %s for the configured HTTP proxy", name)
+		}
+	}
+	return nil
+}
+
 func requestExpectsContinue(req *Request) bool {
 	config := requestHeaderBlocksToWrite(req.Context())
-	if config.initial == nil || config.proto != 1 {
+	if config.initial == nil {
 		return req.expectsContinue()
 	}
 	for _, field := range config.initial.Fields {
@@ -176,7 +212,7 @@ func requestExpectsContinue(req *Request) bool {
 
 func requestWantsClose(req *Request) bool {
 	config := requestHeaderBlocksToWrite(req.Context())
-	if config.initial != nil && config.proto == 1 {
+	if config.initial != nil {
 		for _, field := range config.initial.Fields {
 			if ascii.EqualFold(field.Name, "Connection") && hasToken(field.Value, "close") {
 				return true

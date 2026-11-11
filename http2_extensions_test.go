@@ -532,3 +532,92 @@ func assertHeaderBlock(t *testing.T, got, want http.HeaderBlock) {
 		t.Fatalf("header block = %#v; want %#v", got, want)
 	}
 }
+
+func TestExactRequestBlocksArePerProtocol(t *testing.T) {
+	for _, enableHTTP2 := range []bool{false, true} {
+		t.Run("http2="+strconv.FormatBool(enableHTTP2), func(t *testing.T) {
+			seen := make(chan string, 1)
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				seen <- r.Proto + " " + r.Header.Get("X-Block")
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			server.EnableHTTP2 = enableHTTP2
+			server.StartTLS()
+			defer server.Close()
+
+			req, err := http.NewRequest("GET", server.URL+"/", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req, err = http.WithRequestHeaderBlocks(req, http.HeaderBlock{Kind: http.HeaderBlockInitial, ProtoMajor: 1, Fields: []http.HeaderField{
+				{Name: "Host", Value: req.URL.Host}, {Name: "X-Block", Value: "h1"},
+			}}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A second call for the other protocol keeps the first block.
+			req, err = http.WithRequestHeaderBlocks(req, http.HeaderBlock{Kind: http.HeaderBlockInitial, ProtoMajor: 2, Fields: []http.HeaderField{
+				{Name: ":method", Value: "GET"}, {Name: ":scheme", Value: "https"},
+				{Name: ":authority", Value: req.URL.Host}, {Name: ":path", Value: "/"},
+				{Name: "x-block", Value: "h2"},
+			}}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := server.Client().Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			want := "HTTP/1.1 h1"
+			if enableHTTP2 {
+				want = "HTTP/2.0 h2"
+			}
+			if got := <-seen; got != want {
+				t.Fatalf("server saw %q; want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestHTTP1ExactRequestRejectedOnCachedHTTP2Connection(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+	client := server.Client()
+
+	// Establish a cached HTTP/2 connection; the next HTTPS request reaches it
+	// before the transport dials or checks the negotiated protocol.
+	resp, err := client.Get(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.ProtoMajor != 2 {
+		t.Fatalf("warm-up protocol = %s", resp.Proto)
+	}
+
+	req, err := http.NewRequest("GET", server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err = http.WithRequestHeaderBlocks(req, http.HeaderBlock{
+		Kind: http.HeaderBlockInitial, ProtoMajor: 1,
+		Fields: []http.HeaderField{{Name: "Host", Value: req.URL.Host}, {Name: "X-Exact", Value: "h1"}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp, err := client.Do(req); err == nil {
+		resp.Body.Close()
+		t.Fatal("HTTP/1 exact block was replaced by ordinary HTTP/2 serialization")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("server handler calls = %d; want only the warm-up request", got)
+	}
+}

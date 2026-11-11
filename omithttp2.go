@@ -86,3 +86,9 @@ func http2SetResponseTrailerBlockBridge(ResponseWriter, HeaderBlock) error {
 }
 
 func http2ClearRequestHeaderBlocksBridge(req *Request) *Request { return req }
+
+func http2MarkHTTP1RequestHeaderBlocksBridge(req *Request) *Request { return req }
+
+func http2RequestHeaderBlocksConfiguredBridge(*Request) (initial, trailers bool) {
+	return false, false
+}
