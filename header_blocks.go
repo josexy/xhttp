@@ -146,10 +146,34 @@ func (s *headerBlockStore) snapshot() []HeaderBlock {
 type requestHeaderBlocksWriteContextKey struct{}
 type informationalResponseHandlerContextKey struct{}
 
+// requestHeaderBlocksWriteConfig holds the exact HTTP/1 request blocks. Exact
+// HTTP/2 blocks live in the internal http2 context, so a request may carry one
+// block for each protocol and use whichever matches the negotiated connection.
 type requestHeaderBlocksWriteConfig struct {
-	proto    int
 	initial  *HeaderBlock
 	trailers HeaderBlockFunc
+}
+
+// exactRequestHeaderBlocks reports whether req carries an exact initial block
+// or trailer provider for either protocol.
+func exactRequestHeaderBlocks(req *Request) (initial, trailers bool) {
+	config := requestHeaderBlocksToWrite(req.Context())
+	h2Initial, h2Trailers := http2RequestHeaderBlocksConfiguredBridge(req)
+	return config.initial != nil || h2Initial, config.trailers != nil || h2Trailers
+}
+
+// exactRequestHTTP1Mismatch reports an error when req is about to be written
+// as HTTP/1 but carries an exact initial block only for HTTP/2. The HTTP/2
+// client performs the converse check once a connection has been selected,
+// including cached connections reached before Transport.getConn.
+func exactRequestHTTP1Mismatch(req *Request) error {
+	if requestHeaderBlocksToWrite(req.Context()).initial != nil {
+		return nil
+	}
+	if h2, _ := http2RequestHeaderBlocksConfiguredBridge(req); h2 {
+		return errors.New("http: exact request header block is for HTTP/2, but the connection negotiated HTTP/1")
+	}
+	return nil
 }
 
 func requestHeaderBlocksToWrite(ctx context.Context) requestHeaderBlocksWriteConfig {
@@ -396,6 +420,22 @@ func validateHTTP1HeaderBlock(block HeaderBlock, kind HeaderBlockKind) error {
 // lines come only from initial. A trailer provider is called after the request
 // body reaches EOF. Automatic redirects clear exact blocks before invoking
 // Client.CheckRedirect; same-URL transport retries retain them.
+//
+// Blocks are protocol specific (see HeaderBlock.ProtoMajor). A request may
+// carry one block per protocol: each call replaces only the block for its
+// protocol, and the transport uses the block matching the negotiated
+// connection. If the connection negotiates a protocol that has no block while
+// the other protocol has one, the request fails before anything is written.
+//
+// req.Header is not consulted while an exact block is written, so fields that
+// Client or Transport would normally add are not sent unless the block contains
+// them: Client.Jar cookies, Authorization from URL user information, Referer,
+// Accept-Encoding (and transparent gzip decoding), and Connection: close for
+// DisableKeepAlives. A plain HTTP request through an HTTP proxy with
+// credentials fails unless the HTTP/1 block contains Proxy-Authorization.
+//
+// The blocks travel in the request context. Request.WithContext or
+// Request.Clone with a context not derived from req.Context() drops them.
 func WithRequestHeaderBlocks(req *Request, initial HeaderBlock, trailers HeaderBlockFunc) (*Request, error) {
 	if req == nil {
 		return nil, errors.New("http: nil request")
@@ -417,28 +457,24 @@ func WithRequestHeaderBlocks(req *Request, initial HeaderBlock, trailers HeaderB
 		if err == nil && initial.StatusCode != 0 {
 			err = errors.New("http: exact HTTP/1 request block must not contain StatusCode")
 		}
+		if err != nil {
+			return nil, err
+		}
 		initial = cloneHeaderBlock(initial)
-		config := requestHeaderBlocksWriteConfig{proto: proto, initial: &initial, trailers: trailers}
-		if err == nil {
-			_, err = prepareHTTP1ExactRequest(req, config)
+		config := requestHeaderBlocksWriteConfig{initial: &initial, trailers: trailers}
+		if _, err := prepareHTTP1ExactRequest(req, config); err != nil {
+			return nil, err
 		}
-		if err == nil {
-			req = http2ClearRequestHeaderBlocksBridge(req)
-		}
-	} else {
-		if initial.StatusCode != 0 {
-			return nil, errors.New("http: exact HTTP/2 request block must not contain StatusCode")
-		}
-		req, err = http2WithRequestHeaderBlocksBridge(req, initial, trailers)
+		// Keep any HTTP/2 block: the slots are independent. The marker lets
+		// the HTTP/2 client reject a connection with no HTTP/2 block.
+		req = http2MarkHTTP1RequestHeaderBlocksBridge(req)
+		return req.WithContext(context.WithValue(req.Context(), requestHeaderBlocksWriteContextKey{}, config)), nil
 	}
-	if err != nil {
-		return nil, err
+	if initial.StatusCode != 0 {
+		return nil, errors.New("http: exact HTTP/2 request block must not contain StatusCode")
 	}
-	if proto != 1 {
-		initial = cloneHeaderBlock(initial)
-	}
-	config := requestHeaderBlocksWriteConfig{proto: proto, initial: &initial, trailers: trailers}
-	return req.WithContext(context.WithValue(req.Context(), requestHeaderBlocksWriteContextKey{}, config)), nil
+	// The http2 context holds the HTTP/2 slot; any HTTP/1 block is kept.
+	return http2WithRequestHeaderBlocksBridge(req, initial, trailers)
 }
 
 // WithInformationalResponseHandler returns a shallow copy of req for which

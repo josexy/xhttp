@@ -617,8 +617,8 @@ func (t *Transport) roundTrip(req *Request) (_ *Response, err error) {
 		req.closeBody()
 		return nil, errors.New("http: nil Request.URL")
 	}
-	exactBlocks := requestHeaderBlocksToWrite(req.Context())
-	if req.Header == nil && exactBlocks.initial == nil {
+	exactInitial, exactTrailers := exactRequestHeaderBlocks(req)
+	if req.Header == nil && !exactInitial {
 		req.closeBody()
 		return nil, errors.New("http: nil Request.Header")
 	}
@@ -626,7 +626,7 @@ func (t *Transport) roundTrip(req *Request) (_ *Response, err error) {
 	isHTTP := scheme == "http" || scheme == "https"
 	if isHTTP {
 		// Validate the outgoing headers.
-		if exactBlocks.initial == nil {
+		if !exactInitial {
 			if err := validateHeaders(req.Header); err != "" {
 				req.closeBody()
 				return nil, fmt.Errorf("github.com/josexy/xhttp: invalid header %s", err)
@@ -634,7 +634,7 @@ func (t *Transport) roundTrip(req *Request) (_ *Response, err error) {
 		}
 
 		// Validate trailers when the exact provider does not own them.
-		if exactBlocks.trailers == nil {
+		if !exactTrailers {
 			if err := validateHeaders(req.Trailer); err != "" {
 				req.closeBody()
 				return nil, fmt.Errorf("github.com/josexy/xhttp: invalid trailer %s", err)
@@ -723,18 +723,14 @@ func (t *Transport) roundTrip(req *Request) (_ *Response, err error) {
 		}
 
 		var resp *Response
-		if config := requestHeaderBlocksToWrite(req.Context()); config.initial != nil {
-			actualProto := 1
-			if pconn.alt != nil {
-				actualProto = 2
-			}
-			if config.proto != actualProto {
-				mismatchErr := fmt.Errorf("net/http: exact request header block is for HTTP/%d, but the connection negotiated HTTP/%d", config.proto, actualProto)
-				if pconn.alt == nil {
-					pconn.close(mismatchErr)
-				}
+		if pconn.alt == nil {
+			// The HTTP/2 client checks its side once a connection is selected,
+			// which also covers cached connections reached through
+			// alternateRoundTripper before getConn.
+			if exactErr := checkHTTP1ExactRequest(req, pconn); exactErr != nil {
+				pconn.close(exactErr)
 				req.closeBody()
-				return nil, mismatchErr
+				return nil, exactErr
 			}
 		}
 		if pconn.alt != nil {

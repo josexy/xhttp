@@ -183,6 +183,16 @@ func http2ClearRequestHeaderBlocksBridge(req *Request) *Request {
 	return req.WithContext(http2.ClearRequestHeaderBlocks(req.Context()))
 }
 
+func http2MarkHTTP1RequestHeaderBlocksBridge(req *Request) *Request {
+	return req.WithContext(http2.MarkHTTP1RequestHeaderBlocks(req.Context()))
+}
+
+// http2RequestHeaderBlocksConfiguredBridge reports the exact HTTP/2 blocks
+// configured for req, which are stored separately from exact HTTP/1 blocks.
+func http2RequestHeaderBlocksConfiguredBridge(req *Request) (initial, trailers bool) {
+	return http2.RequestHeaderBlocksConfigured(req.Context())
+}
+
 func (block HeaderBlock) http2() http2.HeaderBlock {
 	converted := http2.HeaderBlock{
 		Kind:      http2.HeaderBlockKind(block.Kind),

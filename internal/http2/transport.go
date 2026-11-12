@@ -1259,6 +1259,14 @@ func (cc *ClientConn) RoundTrip(req *ClientRequest) (*ClientResponse, error) {
 
 func (cc *ClientConn) roundTrip(req *ClientRequest, streamf func(*clientStream)) (*ClientResponse, error) {
 	ctx := req.Context
+	// This runs after a connection was selected, so it also covers cached
+	// connections that the outer transport reaches before dialing.
+	if err := checkExactRequestHeaderBlockProtocol(ctx); err != nil {
+		if req.Body != nil {
+			req.Body.Close()
+		}
+		return nil, err
+	}
 	config, hasFingerprint := fingerprintWriteConfigFromContext(ctx)
 	if hasFingerprint && cc.fingerprintKey != config.connectionKey {
 		return nil, fmt.Errorf("http2: request fingerprint does not match ClientConn: %w", errors.ErrUnsupported)

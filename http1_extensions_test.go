@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/textproto"
+	"net/url"
 	"reflect"
 	"strings"
 	"sync"
@@ -873,5 +874,126 @@ func TestHTTP1HeaderModesWithLateOrderedTrailers(t *testing.T) {
 				t.Fatalf("late trailers or body changed: %q", wire.String())
 			}
 		})
+	}
+}
+
+func TestRequestHeaderOrderEmptyClearsPreviousOrder(t *testing.T) {
+	newRequest := func() *Request {
+		req, err := NewRequest("GET", "http://example.test/", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("X-B", "b")
+		req.Header.Set("X-A", "a")
+		req, err = WithRequestHeaderOrder(req, HeaderOrder{Headers: []string{"x-b", "x-a"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return req
+	}
+	defaultLines := []string{"Host: example.test", "User-Agent: Go-http-client/1.1", "X-A: a", "X-B: b"}
+	for _, next := range []HeaderOrder{{}, {Trailers: []string{"x-end"}}} {
+		req, err := WithRequestHeaderOrder(newRequest(), next)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wire strings.Builder
+		if err := req.Write(&wire); err != nil {
+			t.Fatal(err)
+		}
+		if got := headerLines(wire.String()); !reflect.DeepEqual(got, defaultLines) {
+			t.Fatalf("after %#v header lines = %q; want %q", next, got, defaultLines)
+		}
+	}
+	// A cleared order no longer conflicts with an exact block.
+	req, err := WithRequestHeaderOrder(newRequest(), HeaderOrder{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WithRequestHeaderBlocks(req, HeaderBlock{Kind: HeaderBlockInitial, ProtoMajor: 1, Fields: []HeaderField{{Name: "Host", Value: "example.test"}}}, nil); err != nil {
+		t.Fatalf("exact block after clearing order: %v", err)
+	}
+}
+
+func TestHeaderOrderValidationIsProtocolIndependent(t *testing.T) {
+	req, err := NewRequest("GET", "http://example.test/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, headers := range [][]string{{":status"}, {"x-a", ":method"}, {":method", ":method"}} {
+		if _, err := WithRequestHeaderOrder(req, HeaderOrder{Headers: headers}); err == nil || !strings.HasPrefix(err.Error(), "http: ") {
+			t.Errorf("request order %q error = %v; want an http: validation error", headers, err)
+		}
+	}
+	if _, err := WithRequestHeaderOrder(req, HeaderOrder{Headers: []string{":method", ":path", "x-a"}}); err != nil {
+		t.Errorf("valid request order: %v", err)
+	}
+
+	results := make(chan []error, 1)
+	url, closeServer := startHTTP1TestServer(t, HandlerFunc(func(w ResponseWriter, r *Request) {
+		var errs []error
+		for _, headers := range [][]string{{":method"}, {"x-a", ":status"}} {
+			errs = append(errs, SetResponseHeaderOrder(w, HeaderOrder{Headers: headers}))
+		}
+		errs = append(errs, SetResponseHeaderOrder(w, HeaderOrder{Headers: []string{":status", "x-a"}}))
+		results <- errs
+	}))
+	defer closeServer()
+	resp, err := Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	errs := <-results
+	if errs[0] == nil || errs[1] == nil {
+		t.Errorf("invalid HTTP/1 response orders accepted: %v", errs[:2])
+	}
+	if errs[2] != nil {
+		t.Errorf("valid HTTP/1 response order: %v", errs[2])
+	}
+}
+
+func TestHTTP1ExactRequestRequiresProxyAuthorization(t *testing.T) {
+	seen := make(chan string, 1)
+	proxyURL, closeProxy := startHTTP1TestServer(t, HandlerFunc(func(w ResponseWriter, r *Request) {
+		seen <- r.Header.Get("Proxy-Authorization")
+		w.WriteHeader(StatusNoContent)
+	}))
+	defer closeProxy()
+	proxy, err := url.Parse(proxyURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy.User = url.UserPassword("user", "secret")
+	transport := &Transport{Proxy: ProxyURL(proxy)}
+	defer transport.CloseIdleConnections()
+	send := func(fields ...HeaderField) (*Response, error) {
+		req, err := NewRequest("GET", "http://example.test/", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fields = append([]HeaderField{{Name: "Host", Value: "example.test"}}, fields...)
+		req, err = WithRequestHeaderBlocks(req, HeaderBlock{Kind: HeaderBlockInitial, ProtoMajor: 1, Fields: fields}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return transport.RoundTrip(req)
+	}
+	if _, err := send(); err == nil || !strings.Contains(err.Error(), "Proxy-Authorization") {
+		t.Fatalf("exact block without Proxy-Authorization error = %v", err)
+	}
+	select {
+	case got := <-seen:
+		t.Fatalf("proxy received a request without credentials: %q", got)
+	default:
+	}
+	auth := "Basic dXNlcjpzZWNyZXQ="
+	resp, err := send(HeaderField{Name: "Proxy-Authorization", Value: auth})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if got := <-seen; got != auth {
+		t.Fatalf("Proxy-Authorization = %q; want %q", got, auth)
 	}
 }
