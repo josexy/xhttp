@@ -18,6 +18,11 @@ func (w *response) prepareRequestBodyForExactResponse() {
 	if w.ecReader != nil && w.reqBody.bodyRemains() {
 		w.closeAfterReply = true
 	}
+	// requestTooLarge only records the limit, since it may run concurrently
+	// with the handler. Don't drain a body that has already hit its limit.
+	if w.requestBodyLimitHit.Load() {
+		w.closeAfterReply = true
+	}
 	if w.req.ContentLength == 0 || w.reqBody == nil || w.closeAfterReply || w.fullDuplex {
 		return
 	}
@@ -42,6 +47,7 @@ func (w *response) prepareRequestBodyForExactResponse() {
 	}
 	if tooBig {
 		w.requestTooLarge()
+		w.closeAfterReply = true
 	}
 }
 

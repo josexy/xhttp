@@ -1,6 +1,6 @@
 module github.com/josexy/xhttp
 
-go 1.27.3
+go 1.27.4
 
 require golang.org/x/net v0.58.0
 

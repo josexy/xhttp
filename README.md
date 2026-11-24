@@ -4,18 +4,20 @@ A fork of Go's `net/http` with HTTP/1 and HTTP/2 wire header metadata,
 header ordering, exact header blocks, HTTP/2 fingerprints, retry hooks,
 and response completion support.
 
-Requires Go 1.27.3 or later. Import `github.com/josexy/xhttp` instead of
+Requires Go 1.27.4 or later. Import `github.com/josexy/xhttp` instead of
 `net/http`; the two packages' HTTP types are not interchangeable.
 
 ## Upstream baseline
 
 The HTTP implementation and its internal HTTP/2 package are synchronized with
-[Go 1.27.3](https://github.com/golang/go/tree/go1.27.3/src/net/http), including
+[Go 1.27.4](https://github.com/golang/go/tree/go1.27.4/src/net/http), including
 the fixes since Go 1.27.0 and their regression tests. Fork-specific extensions
 are retained. HPACK and HTTP utility packages still come from `golang.org/x/net`.
 
-Go 1.27.3 updates `crypto/x509` in the Go toolchain; the upstream HTTP source
-is unchanged from Go 1.27.2.
+Go 1.27.3 updated only `crypto/x509` in the Go toolchain. Go 1.27.4 updates
+`crypto/tls` (ML-DSA is no longer advertised in `signature_algorithms_cert`),
+`crypto` FIPS 140 modules, `net` and the runtime; of `net/http`, only the server
+change listed below.
 
 The synchronized baseline includes:
 
@@ -35,6 +37,11 @@ The synchronized baseline includes:
   Applications implementing CONNECT tunnels directly are unaffected by that
   ReverseProxy restriction.
 - Continuation read errors are propagated by the fork's ordered header parser.
+- No data race when a request body read hits a `MaxBytesReader` limit
+  concurrently with the handler. The server no longer adds `Connection: close`
+  to the handler's `Header` map; it closes the connection after the reply and
+  writes `Connection: close` itself. Exact response blocks are still written
+  unchanged, and the body is not drained before an exact response is written.
 
 GODEBUG non-default usage counters are maintained locally in this fork;
 standard-library `runtime/metrics` counters do not report xhttp usage.
